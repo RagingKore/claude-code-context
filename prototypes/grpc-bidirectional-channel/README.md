@@ -1,41 +1,50 @@
-# gRPC Bidirectional Channel Protocol
+# gRPC Duplex Channel Protocol
 
-A modern .NET 10 implementation of a bidirectional gRPC communication protocol featuring real-time messaging and command/response patterns.
+A modern .NET 10 implementation of a full-duplex gRPC protocol where **both client and server can send requests and receive correlated responses**.
 
 ## Features
 
-- **Bidirectional Streaming**: Full-duplex communication between client and server
-- **Message Channel**: Real-time messaging with support for text, binary, JSON, and system events
-- **Command Channel**: Request/response pattern with timeout support and priority levels
+- **Full Duplex RPC**: Both sides can initiate requests and register handlers
+- **Correlation-Based Responses**: Requests are matched to responses via GUID correlation IDs
+- **Non-Blocking**: Async handlers with proper cancellation support
+- **Handler Registration**: Fluent API for registering typed request handlers
+- **Fire-and-Forget Notifications**: Support for one-way messages
 - **Modern C# Features**: Records, nullable reference types, primary constructors
-- **AOT Compatible**: Native AOT publishing support for both client and server
-- **Type-Safe Messaging**: Strongly-typed message envelopes with payload discrimination
+- **AOT Compatible**: Native AOT publishing support
 - **Modern Solution Format**: Uses the new `.slnx` XML-based solution file format
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Protocol Layer                            │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │   Messages      │  │   Contracts     │  │   Converter     │  │
-│  │  ChannelEnvelope│  │  IChannelConn   │  │  Proto ↔ Domain │  │
-│  │  CommandEnvelope│  │  ICommandChannel│  │                 │  │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                    ┌─────────┴─────────┐
-                    │    gRPC Proto     │
-                    │   (channel.proto) │
-                    └─────────┬─────────┘
-                              │
-        ┌─────────────────────┴─────────────────────┐
-        │                                           │
-┌───────┴───────┐                         ┌─────────┴────────┐
-│    Server     │  ←──── Streaming ────→  │     Client       │
-│  ChannelSvc   │                         │  ChannelConn     │
-│  CommandExec  │                         │  CommandChannel  │
-└───────────────┘                         └──────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         DuplexChannel                                │
+│  ┌─────────────────────────────────────────────────────────────────┐│
+│  │  • SendRequestAsync<TReq, TRes>() → awaits correlated response  ││
+│  │  • OnRequest<TReq, TRes>() → registers handler                  ││
+│  │  • SendNotificationAsync() → fire-and-forget                    ││
+│  │  • OnNotification() → registers notification handler            ││
+│  └─────────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                    ┌─────────────┴─────────────┐
+                    │   gRPC Bidirectional      │
+                    │   Streaming (Open)        │
+                    └─────────────┬─────────────┘
+                                  │
+        ┌─────────────────────────┴─────────────────────────┐
+        ▼                                                   ▼
+┌───────────────┐                                 ┌───────────────┐
+│    Server     │  ←───── Request/Response ─────→ │    Client     │
+│               │                                 │               │
+│ Can SEND:     │                                 │ Can SEND:     │
+│ • Requests    │                                 │ • Requests    │
+│ • Responses   │                                 │ • Responses   │
+│ • Notifs      │                                 │ • Notifs      │
+│               │                                 │               │
+│ Can HANDLE:   │                                 │ Can HANDLE:   │
+│ • Requests    │                                 │ • Requests    │
+│ • Notifs      │                                 │ • Notifs      │
+└───────────────┘                                 └───────────────┘
 ```
 
 ## Project Structure
@@ -44,15 +53,15 @@ A modern .NET 10 implementation of a bidirectional gRPC communication protocol f
 prototypes/grpc-bidirectional-channel/
 ├── src/
 │   ├── GrpcChannel.Protocol/       # Shared protocol library
-│   │   ├── Messages/               # Domain message types (records)
-│   │   ├── Contracts/              # Interfaces and abstractions
+│   │   ├── Contracts/              # IDuplexChannel, IPayloadSerializer
 │   │   ├── Protos/                 # gRPC proto definitions
-│   │   └── MessageConverter.cs     # Proto ↔ Domain conversion
+│   │   └── DuplexChannel.cs        # Core channel implementation
 │   ├── GrpcChannel.Server/         # gRPC server implementation
-│   │   ├── Services/               # Service implementations
-│   │   └── Program.cs              # Server entry point
+│   │   ├── Services/               # DuplexServiceImpl, ConnectionRegistry
+│   │   └── Program.cs              # Server with handler registration
 │   └── GrpcChannel.Client/         # gRPC client implementation
-│       └── Program.cs              # Client demo
+│       ├── DuplexClient.cs         # Client wrapper
+│       └── Program.cs              # Client demo with handlers
 ├── GrpcChannel.slnx                # Solution file (XML format)
 └── README.md                       # This file
 ```
@@ -89,158 +98,212 @@ dotnet run --project src/GrpcChannel.Server
 dotnet run --project src/GrpcChannel.Client
 ```
 
-## Protocol Features
-
-### Message Types
+## Protocol Messages
 
 | Type | Description |
 |------|-------------|
-| `Text` | Plain text messages with optional encoding |
-| `Binary` | Binary data with content type and optional filename |
-| `JSON` | JSON data with optional schema URI |
-| `System` | System events (connected, disconnected, error, etc.) |
-| `Heartbeat` | Keep-alive messages |
-| `Ack` | Acknowledgment messages |
-| `Error` | Error messages with code and details |
+| `Request` | Expects a correlated response (has `correlation_id`) |
+| `Response` | Correlates to a request via `correlation_id` |
+| `Notification` | Fire-and-forget, no response expected |
 
-### Command Priority Levels
+### Response Status Codes
 
-| Priority | Description |
-|----------|-------------|
-| `Low` | Non-urgent commands |
-| `Normal` | Default priority |
-| `High` | Time-sensitive commands |
-| `Critical` | Immediate processing required |
-
-### Built-in Commands
-
-| Command | Parameters | Description |
-|---------|------------|-------------|
-| `ping` | - | Health check, returns "pong" |
-| `echo` | `message` | Echoes the message back |
-| `status` | - | Returns server status as JSON |
-| `delay` | `ms` | Waits for specified milliseconds |
-| `math` | `operation`, `a`, `b` | Performs math operations |
+| Status | Description |
+|--------|-------------|
+| `Ok` | Request completed successfully |
+| `Error` | General error occurred |
+| `NotFound` | Method/handler not found |
+| `Timeout` | Request timed out |
+| `Cancelled` | Request was cancelled |
+| `Unauthorized` | Not authorized |
+| `InvalidRequest` | Request was malformed |
 
 ## Code Examples
 
-### Connecting to the Message Channel
+### Client: Sending Requests to Server
 
 ```csharp
-var options = new ChannelConnectionOptions("https://localhost:5001", "my-client");
-var factory = new GrpcChannelClientFactory(loggerFactory);
+await using var client = new DuplexClient(options, serializer);
+await client.ConnectAsync();
 
-await using var connection = await factory.CreateConnectionAsync(options);
+// Send typed request, await typed response
+var result = await client.Channel.SendRequestAsync<EchoRequest, EchoResponse>(
+    "echo",
+    new EchoRequest("Hello!"));
 
-// Handle incoming messages
-connection.MessageReceived += (_, args) =>
+if (result.IsSuccess)
 {
-    Console.WriteLine($"Received: {args.Envelope.Payload}");
-};
-
-// Send a text message
-await connection.SendTextAsync("Hello, Server!");
-
-// Receive messages
-await foreach (var envelope in connection.IncomingMessages)
-{
-    // Process messages...
+    Console.WriteLine($"Echo: {result.Value!.Message}");
+    Console.WriteLine($"RTT: {result.DurationMs}ms");
 }
-```
 
-### Using the Command Channel
-
-```csharp
-await using var channel = await factory.CreateCommandChannelAsync(options);
-
-// Ping the server
-var (success, roundTripMs) = await channel.PingAsync();
-
-// Echo a message
-var response = await channel.EchoAsync("Hello!");
-
-// Execute custom command with parameters
-var result = await channel.ExecuteCommandAsync(
+// With timeout
+var mathResult = await client.Channel.SendRequestAsync<MathRequest, MathResponse>(
     "math",
-    new Dictionary<string, string>
-    {
-        ["operation"] = "multiply",
-        ["a"] = "6",
-        ["b"] = "7"
-    },
+    new MathRequest("multiply", 6, 7),
     timeoutMs: 5000);
 ```
 
-### Implementing a Custom Command Handler
+### Client: Registering Handlers (Server → Client)
 
 ```csharp
-public sealed class MyCommandHandler(ILogger<MyCommandHandler> logger) : ICommandHandler
-{
-    public string CommandName => "my-command";
-
-    public ValueTask<CommandResponseEnvelope> HandleAsync(
-        CommandRequestEnvelope request,
-        CancellationToken cancellationToken = default)
+// Server can now call methods on the client!
+client.Channel.OnRequest<GetClientInfoRequest, ClientInfoResponse>(
+    "client.info",
+    async (request, ctx, ct) =>
     {
-        var param = request.Parameters?.GetValueOrDefault("input") ?? "default";
+        return new ClientInfoResponse(
+            Environment.MachineName,
+            Environment.ProcessId);
+    });
 
-        // Process the command...
+// Handle notifications
+client.Channel.OnNotification<BroadcastMessage>(
+    "broadcast",
+    async (message, ctx, ct) =>
+    {
+        Console.WriteLine($"Broadcast: {message.Text}");
+    });
+```
 
-        return ValueTask.FromResult(CommandResponseEnvelope.Success(
-            request.RequestId,
-            Encoding.UTF8.GetBytes($"Processed: {param}")));
-    }
+### Server: Registering Handlers (Client → Server)
+
+```csharp
+registry.OnAllChannels(channel =>
+{
+    channel.OnRequest<EchoRequest, EchoResponse>("echo", async (req, ctx, ct) =>
+    {
+        return new EchoResponse(req.Message, DateTimeOffset.UtcNow);
+    });
+
+    channel.OnRequest<MathRequest, MathResponse>("math", async (req, ctx, ct) =>
+    {
+        var result = req.Operation switch
+        {
+            "add" => req.A + req.B,
+            "multiply" => req.A * req.B,
+            _ => double.NaN
+        };
+        return new MathResponse(result);
+    });
+});
+```
+
+### Server: Sending Requests to Client
+
+```csharp
+// Get a specific client channel
+var clientChannel = registry.GetChannelByClientId("client-123");
+
+// Server initiates request to client
+var info = await clientChannel!.SendRequestAsync<GetClientInfoRequest, ClientInfoResponse>(
+    "client.info",
+    new GetClientInfoRequest());
+
+Console.WriteLine($"Client machine: {info.Value!.MachineName}");
+```
+
+### Fire-and-Forget Notifications
+
+```csharp
+// Send notification (no response)
+await channel.SendNotificationAsync("client.event", new EventData("startup"));
+
+// Broadcast to all clients
+foreach (var client in registry.GetAllChannels())
+{
+    await client.Channel.SendNotificationAsync("broadcast", new Message("Hello all!"));
 }
+```
 
-// Register in DI
-builder.Services.AddSingleton<ICommandHandler, MyCommandHandler>();
+## How Correlation Works
+
+```
+Client                                Server
+  │                                     │
+  │──── Request ────────────────────────▶│
+  │     correlation_id: "abc123"        │
+  │     method: "echo"                  │
+  │     payload: {...}                  │
+  │                                     │
+  │     [Client stores pending          │
+  │      request with "abc123"]         │
+  │                                     │
+  │                                     │──── Handler invoked
+  │                                     │     for "echo" method
+  │                                     │
+  │◀──── Response ──────────────────────│
+  │      correlation_id: "abc123"       │
+  │      status: OK                     │
+  │      payload: {...}                 │
+  │                                     │
+  │     [Client matches "abc123"        │
+  │      completes awaiting Task]       │
+  │                                     │
 ```
 
 ## Modern C# Features Used
 
-### Records with Primary Constructors
+### Records for DTOs
 
 ```csharp
-public sealed record ChannelEnvelope(
-    string Id,
-    string? CorrelationId,
-    IMessagePayload Payload,
-    IReadOnlyDictionary<string, string>? Metadata = null,
-    DateTimeOffset? TimestampUtc = null);
+public sealed record EchoRequest(string Message);
+public sealed record EchoResponse(string Message, DateTimeOffset Timestamp);
+
+public sealed record MathRequest(string Operation, double A, double B);
+public sealed record MathResponse(double Result);
 ```
 
-### Nullable Reference Types
+### Primary Constructors
 
 ```csharp
-public interface IConnectionManager
+public sealed class DuplexClient(
+    DuplexClientOptions options,
+    IPayloadSerializer serializer,
+    ILogger<DuplexClient>? logger = null) : IAsyncDisposable
 {
-    ServerConnection? GetConnection(string connectionId);
+    // Fields available directly from constructor parameters
 }
 ```
 
-### Primary Constructors for Classes
+### Handler Registration with Lambdas
 
 ```csharp
-public sealed class ChannelServiceImpl(
-    ILogger<ChannelServiceImpl> logger,
-    IConnectionManager connectionManager,
-    ICommandExecutor commandExecutor) : ChannelService.ChannelServiceBase
+channel.OnRequest<TRequest, TResponse>("method", async (request, context, ct) =>
 {
-    // logger, connectionManager, commandExecutor are available as fields
+    // Non-blocking async handler
+    return new TResponse(...);
+});
+```
+
+### Result Types
+
+```csharp
+var result = await channel.SendRequestAsync<Req, Res>("method", request);
+
+if (result.IsSuccess)
+{
+    var value = result.Value!;
 }
-```
-
-### Pattern Matching
-
-```csharp
-var content = payload switch
+else
 {
-    TextMessagePayload text => $"Text: {text.Content}",
-    SystemEventPayload system => $"System: {system.EventType}",
-    HeartbeatPayload => "Heartbeat",
-    _ => $"Unknown: {payload.GetType().Name}"
-};
+    Console.WriteLine($"Failed: {result.Status} - {result.Error}");
+}
+
+// Or throw on failure
+var value = result.GetValueOrThrow();
 ```
+
+## Built-in Server Methods
+
+| Method | Request | Response | Description |
+|--------|---------|----------|-------------|
+| `ping` | `PingRequest` | `PongResponse` | Health check |
+| `echo` | `EchoRequest` | `EchoResponse` | Echo message back |
+| `status` | `StatusRequest` | `StatusResponse` | Server status |
+| `math` | `MathRequest` | `MathResponse` | Math operations |
+| `delay` | `DelayRequest` | `DelayResponse` | Delay for testing |
+| `broadcast` | `BroadcastRequest` | `BroadcastResponse` | Broadcast to clients |
 
 ## AOT Publishing
 

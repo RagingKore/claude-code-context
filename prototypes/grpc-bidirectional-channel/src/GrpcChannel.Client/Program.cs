@@ -1,6 +1,6 @@
 using GrpcChannel.Client;
+using GrpcChannel.Protocol;
 using GrpcChannel.Protocol.Contracts;
-using GrpcChannel.Protocol.Messages;
 using Microsoft.Extensions.Logging;
 
 // Setup logging
@@ -12,167 +12,214 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 
 var logger = loggerFactory.CreateLogger<Program>();
 
-Console.WriteLine("=== gRPC Bidirectional Channel Client Demo ===\n");
+Console.WriteLine("=== gRPC Duplex Channel Client Demo ===\n");
 
-// Create connection options
-var options = new ChannelConnectionOptions(
-    ServerAddress: "https://localhost:5001",
-    ClientId: $"demo-client-{Environment.ProcessId}");
+// Create client
+var options = DuplexClientOptions.ForLocalDevelopment();
+var serializer = JsonPayloadSerializer.Default;
+var clientLogger = loggerFactory.CreateLogger<DuplexClient>();
 
-var factory = new GrpcChannelClientFactory(loggerFactory);
+await using var client = new DuplexClient(options, serializer, clientLogger);
 
-// Demo 1: Message Channel
-await DemoMessageChannelAsync(factory, options, logger);
-
-// Demo 2: Command Channel
-await DemoCommandChannelAsync(factory, options, logger);
-
-Console.WriteLine("\n=== Demo Complete ===");
-
-static async Task DemoMessageChannelAsync(
-    IChannelClientFactory factory,
-    ChannelConnectionOptions options,
-    ILogger logger)
+try
 {
-    Console.WriteLine("\n--- Message Channel Demo ---\n");
+    // Connect to server
+    Console.WriteLine("Connecting to server...");
+    await client.ConnectAsync();
+    Console.WriteLine($"Connected!\n");
 
-    try
-    {
-        await using var connection = await factory.CreateConnectionAsync(options);
+    // Register client-side handlers (server can call these)
+    RegisterClientHandlers(client.Channel, logger);
 
-        Console.WriteLine($"Connected with ID: {connection.ConnectionId}");
+    // Demo: Client sends requests to server
+    await DemoClientToServerRequests(client.Channel, logger);
 
-        // Setup message handler
-        connection.MessageReceived += (_, args) =>
-        {
-            var payload = args.Envelope.Payload;
-            var content = payload switch
-            {
-                TextMessagePayload text => $"Text: {text.Content}",
-                SystemEventPayload system => $"System: {system.EventType} - {system.Message}",
-                _ => $"Payload: {payload.GetType().Name}"
-            };
-            Console.WriteLine($"  <- Received: {content}");
-        };
+    // Demo: Notifications
+    await DemoNotifications(client.Channel, logger);
 
-        // Start receiving messages in background
-        var receiveTask = Task.Run(async () =>
-        {
-            await foreach (var envelope in connection.IncomingMessages)
-            {
-                // Messages are also handled by the event above
-            }
-        });
-
-        // Send some messages
-        Console.WriteLine("Sending messages...");
-
-        await connection.SendTextAsync("Hello from client!");
-        await Task.Delay(500);
-
-        await connection.SendHeartbeatAsync();
-        await Task.Delay(500);
-
-        await connection.SendJsonAsync("""{"action": "test", "value": 42}""");
-        await Task.Delay(500);
-
-        // Wait a bit for responses
-        await Task.Delay(1000);
-
-        Console.WriteLine("Message channel demo complete.");
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Message channel demo failed");
-        Console.WriteLine($"Error: {ex.Message}");
-        Console.WriteLine("Make sure the server is running on https://localhost:5001");
-    }
+    // Keep running to receive server requests
+    Console.WriteLine("\n--- Listening for server requests (press Enter to exit) ---");
+    Console.ReadLine();
+}
+catch (Exception ex)
+{
+    logger.LogError(ex, "Demo failed");
+    Console.WriteLine($"Error: {ex.Message}");
+    Console.WriteLine("Make sure the server is running on https://localhost:5001");
 }
 
-static async Task DemoCommandChannelAsync(
-    IChannelClientFactory factory,
-    ChannelConnectionOptions options,
-    ILogger logger)
+static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
 {
-    Console.WriteLine("\n--- Command Channel Demo ---\n");
+    Console.WriteLine("--- Registering Client-Side Handlers ---\n");
 
-    try
+    // Handler for server-initiated requests
+    channel.OnRequest<ServerPingRequest, ClientPongResponse>("client.ping", async (request, ctx, ct) =>
     {
-        await using var channel = (GrpcCommandChannel)await factory.CreateCommandChannelAsync(options);
+        logger.LogInformation("Server pinged client: {Message}", request.Message);
+        return new ClientPongResponse("pong from client", DateTimeOffset.UtcNow);
+    });
 
-        Console.WriteLine($"Command channel opened with ID: {channel.ChannelId}");
+    // Handler for server requesting client info
+    channel.OnRequest<GetClientInfoRequest, ClientInfoResponse>("client.info", async (request, ctx, ct) =>
+    {
+        logger.LogInformation("Server requested client info");
+        return new ClientInfoResponse(
+            Environment.MachineName,
+            Environment.OSVersion.ToString(),
+            Environment.ProcessId,
+            DateTimeOffset.UtcNow);
+    });
 
-        // Ping command
-        Console.WriteLine("\n1. Ping Command:");
-        var (pingSuccess, pingMs) = await channel.PingAsync();
-        Console.WriteLine($"   Ping: {(pingSuccess ? "OK" : "Failed")}, RTT: {pingMs}ms");
+    // Handler for server-initiated computation
+    channel.OnRequest<ComputeRequest, ComputeResponse>("client.compute", async (request, ctx, ct) =>
+    {
+        logger.LogInformation("Server requested computation: {Expression}", request.Expression);
 
-        // Echo command
-        Console.WriteLine("\n2. Echo Command:");
-        var echoResult = await channel.EchoAsync("Hello, gRPC!");
-        Console.WriteLine($"   Echo: {echoResult}");
-
-        // Status command
-        Console.WriteLine("\n3. Status Command:");
-        var statusResponse = await channel.ExecuteCommandAsync("status");
-        if (statusResponse.IsSuccess && statusResponse.Result is not null)
+        // Simple expression evaluation for demo
+        var result = request.Expression switch
         {
-            var statusJson = System.Text.Encoding.UTF8.GetString(statusResponse.Result);
-            Console.WriteLine($"   Status: {statusJson}");
-        }
-
-        // Math commands
-        Console.WriteLine("\n4. Math Commands:");
-        var operations = new[]
-        {
-            ("add", 10, 5),
-            ("subtract", 10, 5),
-            ("multiply", 10, 5),
-            ("divide", 10, 5)
+            "cpu_usage" => Random.Shared.NextDouble() * 100,
+            "memory_usage" => GC.GetTotalMemory(false) / 1024.0 / 1024.0,
+            _ => 0.0
         };
 
-        foreach (var (op, a, b) in operations)
-        {
-            var mathResponse = await channel.ExecuteCommandAsync(
-                "math",
-                new Dictionary<string, string>
-                {
-                    ["operation"] = op,
-                    ["a"] = a.ToString(),
-                    ["b"] = b.ToString()
-                });
+        return new ComputeResponse(request.Expression, result);
+    });
 
-            if (mathResponse.IsSuccess && mathResponse.Result is not null)
-            {
-                var result = System.Text.Encoding.UTF8.GetString(mathResponse.Result);
-                Console.WriteLine($"   {a} {op} {b} = {result}");
-            }
-        }
-
-        // Delay command with timeout
-        Console.WriteLine("\n5. Delay Command (testing timeout):");
-        Console.WriteLine("   Sending delay request for 500ms...");
-        var delayResponse = await channel.ExecuteCommandAsync(
-            "delay",
-            new Dictionary<string, string> { ["ms"] = "500" },
-            timeoutMs: 2000);
-        Console.WriteLine($"   Delay completed in {delayResponse.DurationMs}ms, Status: {delayResponse.Status}");
-
-        // Test timeout
-        Console.WriteLine("\n6. Testing Timeout:");
-        Console.WriteLine("   Sending delay request for 3000ms with 1000ms timeout...");
-        var timeoutResponse = await channel.ExecuteCommandAsync(
-            "delay",
-            new Dictionary<string, string> { ["ms"] = "3000" },
-            timeoutMs: 1000);
-        Console.WriteLine($"   Status: {timeoutResponse.Status} (expected: Timeout)");
-
-        Console.WriteLine("\nCommand channel demo complete.");
-    }
-    catch (Exception ex)
+    // Handler for broadcast notifications from server
+    channel.OnNotification<BroadcastNotification>("broadcast", async (notification, ctx, ct) =>
     {
-        logger.LogError(ex, "Command channel demo failed");
-        Console.WriteLine($"Error: {ex.Message}");
-        Console.WriteLine("Make sure the server is running on https://localhost:5001");
-    }
+        Console.WriteLine($"\n[BROADCAST] {notification.Message}");
+    });
+
+    Console.WriteLine("Registered handlers: client.ping, client.info, client.compute, broadcast\n");
 }
+
+static async Task DemoClientToServerRequests(IDuplexChannel channel, ILogger logger)
+{
+    Console.WriteLine("--- Client → Server Requests ---\n");
+
+    // 1. Ping
+    Console.WriteLine("1. Ping:");
+    var pingResult = await channel.SendRequestAsync<PingRequest, PongResponse>("ping", new PingRequest());
+    if (pingResult.IsSuccess)
+    {
+        Console.WriteLine($"   Pong: {pingResult.Value!.Message} (RTT: {pingResult.DurationMs}ms)");
+    }
+    else
+    {
+        Console.WriteLine($"   Failed: {pingResult.Error}");
+    }
+
+    // 2. Echo
+    Console.WriteLine("\n2. Echo:");
+    var echoResult = await channel.SendRequestAsync<EchoRequest, EchoResponse>(
+        "echo",
+        new EchoRequest("Hello from bidirectional client!"));
+    if (echoResult.IsSuccess)
+    {
+        Console.WriteLine($"   Echo: {echoResult.Value!.Message}");
+    }
+
+    // 3. Status
+    Console.WriteLine("\n3. Status:");
+    var statusResult = await channel.SendRequestAsync<StatusRequest, StatusResponse>("status", new StatusRequest());
+    if (statusResult.IsSuccess)
+    {
+        var status = statusResult.Value!;
+        Console.WriteLine($"   Active connections: {status.ActiveConnections}");
+        Console.WriteLine($"   Client IDs: [{string.Join(", ", status.ClientIds)}]");
+        Console.WriteLine($"   Server uptime: {status.UptimeMs}ms");
+    }
+
+    // 4. Math operations
+    Console.WriteLine("\n4. Math Operations:");
+    var operations = new[]
+    {
+        ("add", 10.0, 5.0),
+        ("subtract", 10.0, 5.0),
+        ("multiply", 6.0, 7.0),
+        ("divide", 100.0, 4.0)
+    };
+
+    foreach (var (op, a, b) in operations)
+    {
+        var mathResult = await channel.SendRequestAsync<MathRequest, MathResponse>(
+            "math",
+            new MathRequest(op, a, b));
+
+        if (mathResult.IsSuccess)
+        {
+            Console.WriteLine($"   {a} {op} {b} = {mathResult.Value!.Result}");
+        }
+    }
+
+    // 5. Delay (timeout test)
+    Console.WriteLine("\n5. Delay Test:");
+    Console.WriteLine("   Requesting 500ms delay...");
+    var delayResult = await channel.SendRequestAsync<DelayRequest, DelayResponse>(
+        "delay",
+        new DelayRequest(500));
+    if (delayResult.IsSuccess)
+    {
+        Console.WriteLine($"   Completed in {delayResult.DurationMs}ms");
+    }
+
+    // 6. Timeout test
+    Console.WriteLine("\n6. Timeout Test:");
+    Console.WriteLine("   Requesting 3000ms delay with 1000ms timeout...");
+    var timeoutResult = await channel.SendRequestAsync<DelayRequest, DelayResponse>(
+        "delay",
+        new DelayRequest(3000),
+        timeoutMs: 1000);
+    Console.WriteLine($"   Status: {timeoutResult.Status} (expected: Timeout)");
+
+    // 7. Method not found
+    Console.WriteLine("\n7. Not Found Test:");
+    var notFoundResult = await channel.SendRequestAsync<object, object>(
+        "nonexistent.method",
+        new { });
+    Console.WriteLine($"   Status: {notFoundResult.Status} - {notFoundResult.Error}");
+}
+
+static async Task DemoNotifications(IDuplexChannel channel, ILogger logger)
+{
+    Console.WriteLine("\n--- Notifications ---\n");
+
+    // Send notification to server
+    Console.WriteLine("Sending notification to server...");
+    await channel.SendNotificationAsync(
+        "client.event",
+        new ClientEventNotification("startup", "Client demo started"));
+
+    Console.WriteLine("Notification sent (fire-and-forget)");
+}
+
+// Request/Response DTOs (matching server)
+public sealed record PingRequest();
+public sealed record PongResponse(string Message, DateTimeOffset Timestamp);
+
+public sealed record EchoRequest(string Message);
+public sealed record EchoResponse(string Message, DateTimeOffset Timestamp);
+
+public sealed record StatusRequest();
+public sealed record StatusResponse(int ActiveConnections, string[] ClientIds, DateTimeOffset ServerTime, long UptimeMs);
+
+public sealed record MathRequest(string Operation, double A, double B);
+public sealed record MathResponse(double Result, string Operation, double A, double B);
+
+public sealed record DelayRequest(int DelayMs);
+public sealed record DelayResponse(int DelayedMs, DateTimeOffset CompletedAt);
+
+// Client-side handler DTOs (server can call these)
+public sealed record ServerPingRequest(string Message);
+public sealed record ClientPongResponse(string Message, DateTimeOffset Timestamp);
+
+public sealed record GetClientInfoRequest();
+public sealed record ClientInfoResponse(string MachineName, string OsVersion, int ProcessId, DateTimeOffset Timestamp);
+
+public sealed record ComputeRequest(string Expression);
+public sealed record ComputeResponse(string Expression, double Result);
+
+public sealed record BroadcastNotification(string Message);
+public sealed record ClientEventNotification(string EventType, string Data);

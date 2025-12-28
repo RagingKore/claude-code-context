@@ -4,120 +4,61 @@ option csharp_namespace = "GrpcChannel.Protocol.Protos";
 
 package channel;
 
-// The bidirectional channel service
-service ChannelService {
-  // Bidirectional streaming RPC for real-time communication
-  rpc Connect(stream ChannelMessage) returns (stream ChannelMessage);
-
-  // Bidirectional streaming for command/response patterns
-  rpc ExecuteCommands(stream CommandRequest) returns (stream CommandResponse);
+// Bidirectional duplex service supporting full-duplex RPC
+// Both client and server can send requests and receive correlated responses
+service DuplexService {
+  // Single bidirectional stream for all communication
+  rpc Open(stream DuplexMessage) returns (stream DuplexMessage);
 }
 
-// Represents a message in the channel
-message ChannelMessage {
-  string message_id = 1;
-  string correlation_id = 2;
-  MessageType type = 3;
-  oneof payload {
-    TextPayload text = 4;
-    BinaryPayload binary = 5;
-    JsonPayload json = 6;
-    SystemPayload system = 7;
+// Unified message envelope for bidirectional communication
+message DuplexMessage {
+  string id = 1;
+  int64 timestamp_utc = 2;
+  map<string, string> metadata = 3;
+
+  oneof content {
+    Request request = 4;
+    Response response = 5;
+    Notification notification = 6;
   }
-  map<string, string> metadata = 8;
-  int64 timestamp_utc = 9;
-  optional string sender_id = 10;
-  optional string target_id = 11;
 }
 
-// Message types
-enum MessageType {
-  MESSAGE_TYPE_UNSPECIFIED = 0;
-  MESSAGE_TYPE_TEXT = 1;
-  MESSAGE_TYPE_BINARY = 2;
-  MESSAGE_TYPE_JSON = 3;
-  MESSAGE_TYPE_SYSTEM = 4;
-  MESSAGE_TYPE_HEARTBEAT = 5;
-  MESSAGE_TYPE_ACK = 6;
-  MESSAGE_TYPE_ERROR = 7;
+// Request message expecting a correlated response
+message Request {
+  string correlation_id = 1;   // GUID for correlating response
+  string method = 2;           // Method/handler name to invoke
+  bytes payload = 3;           // Serialized request payload
+  optional int32 timeout_ms = 4;
+  map<string, string> headers = 5;
 }
 
-// Text message payload
-message TextPayload {
-  string content = 1;
-  optional string encoding = 2;
+// Response message correlated to a request
+message Response {
+  string correlation_id = 1;   // Must match the request's correlation_id
+  StatusCode status = 2;
+  bytes payload = 3;           // Serialized response payload
+  optional string error = 4;
+  optional int32 error_code = 5;
+  int64 duration_ms = 6;
+  map<string, string> headers = 7;
 }
 
-// Binary message payload
-message BinaryPayload {
-  bytes data = 1;
-  string content_type = 2;
-  optional string filename = 3;
+// Fire-and-forget notification (no response expected)
+message Notification {
+  string topic = 1;
+  bytes payload = 2;
+  map<string, string> headers = 3;
 }
 
-// JSON message payload
-message JsonPayload {
-  string json_data = 1;
-  optional string schema_uri = 2;
-}
-
-// System message payload
-message SystemPayload {
-  SystemEventType event_type = 1;
-  string message = 2;
-  map<string, string> details = 3;
-}
-
-// System event types
-enum SystemEventType {
-  SYSTEM_EVENT_TYPE_UNSPECIFIED = 0;
-  SYSTEM_EVENT_TYPE_CONNECTED = 1;
-  SYSTEM_EVENT_TYPE_DISCONNECTED = 2;
-  SYSTEM_EVENT_TYPE_RECONNECTING = 3;
-  SYSTEM_EVENT_TYPE_ERROR = 4;
-  SYSTEM_EVENT_TYPE_PING = 5;
-  SYSTEM_EVENT_TYPE_PONG = 6;
-}
-
-// Command request for command/response pattern
-message CommandRequest {
-  string request_id = 1;
-  string command_name = 2;
-  map<string, string> parameters = 3;
-  optional bytes payload = 4;
-  int64 timestamp_utc = 5;
-  optional int32 timeout_ms = 6;
-  CommandPriority priority = 7;
-}
-
-// Command priority levels
-enum CommandPriority {
-  COMMAND_PRIORITY_UNSPECIFIED = 0;
-  COMMAND_PRIORITY_LOW = 1;
-  COMMAND_PRIORITY_NORMAL = 2;
-  COMMAND_PRIORITY_HIGH = 3;
-  COMMAND_PRIORITY_CRITICAL = 4;
-}
-
-// Command response
-message CommandResponse {
-  string request_id = 1;
-  CommandStatus status = 2;
-  optional string error_message = 3;
-  optional int32 error_code = 4;
-  optional bytes result = 5;
-  map<string, string> metadata = 6;
-  int64 timestamp_utc = 7;
-  int64 duration_ms = 8;
-}
-
-// Command execution status
-enum CommandStatus {
-  COMMAND_STATUS_UNSPECIFIED = 0;
-  COMMAND_STATUS_SUCCESS = 1;
-  COMMAND_STATUS_FAILED = 2;
-  COMMAND_STATUS_TIMEOUT = 3;
-  COMMAND_STATUS_CANCELLED = 4;
-  COMMAND_STATUS_NOT_FOUND = 5;
-  COMMAND_STATUS_UNAUTHORIZED = 6;
+// Response status codes
+enum StatusCode {
+  STATUS_CODE_UNSPECIFIED = 0;
+  STATUS_CODE_OK = 1;
+  STATUS_CODE_ERROR = 2;
+  STATUS_CODE_NOT_FOUND = 3;
+  STATUS_CODE_TIMEOUT = 4;
+  STATUS_CODE_CANCELLED = 5;
+  STATUS_CODE_UNAUTHORIZED = 6;
+  STATUS_CODE_INVALID_REQUEST = 7;
 }
