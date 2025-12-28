@@ -10,6 +10,7 @@ A modern .NET 10 implementation of a bidirectional gRPC communication protocol f
 - **Modern C# Features**: Records, nullable reference types, primary constructors
 - **AOT Compatible**: Native AOT publishing support for both client and server
 - **Type-Safe Messaging**: Strongly-typed message envelopes with payload discrimination
+- **Modern Solution Format**: Uses the new `.slnx` XML-based solution file format
 
 ## Architecture
 
@@ -52,7 +53,7 @@ prototypes/grpc-bidirectional-channel/
 │   │   └── Program.cs              # Server entry point
 │   └── GrpcChannel.Client/         # gRPC client implementation
 │       └── Program.cs              # Client demo
-├── GrpcChannel.sln                 # Solution file
+├── GrpcChannel.slnx                # Solution file (XML format)
 └── README.md                       # This file
 ```
 

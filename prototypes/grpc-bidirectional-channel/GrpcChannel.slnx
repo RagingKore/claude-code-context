@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/GrpcChannel.Protocol/GrpcChannel.Protocol.csproj" />
+    <Project Path="src/GrpcChannel.Server/GrpcChannel.Server.csproj" />
+    <Project Path="src/GrpcChannel.Client/GrpcChannel.Client.csproj" />
+  </Folder>
+</Solution>
