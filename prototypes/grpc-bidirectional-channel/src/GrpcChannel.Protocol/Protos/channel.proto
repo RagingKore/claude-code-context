@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "google/protobuf/any.proto";
+
 option csharp_namespace = "GrpcChannel.Protocol.Protos";
 
 package channel;
@@ -12,43 +14,82 @@ service DuplexService {
 }
 
 // Unified message envelope for bidirectional communication
+//
+// Message type inference:
+// - Request:      method is set, correlation_id is set
+// - Response:     method is empty, correlation_id matches a pending request
+// - Notification: method is set, correlation_id is empty
 message DuplexMessage {
+  // Unique message identifier
   string id = 1;
-  int64 timestamp_utc = 2;
-  map<string, string> metadata = 3;
 
-  oneof content {
-    Request request = 4;
-    Response response = 5;
-    Notification notification = 6;
-  }
+  // Correlation ID for request/response matching
+  // - Requests: set by sender, used to match response
+  // - Responses: echoes the request's correlation_id
+  // - Notifications: empty (fire-and-forget)
+  string correlation_id = 2;
+
+  // Method or topic name
+  // - Requests: method/handler to invoke
+  // - Responses: empty
+  // - Notifications: topic name
+  string method = 3;
+
+  // Message payload (Any allows typed messages)
+  google.protobuf.Any payload = 4;
+
+  // Response status (only for responses)
+  StatusCode status = 5;
+
+  // Error details (only for failed responses)
+  ProblemDetails problem = 6;
+
+  // Request timeout in milliseconds (only for requests)
+  int32 timeout_ms = 7;
+
+  // Processing duration in milliseconds (only for responses)
+  int64 duration_ms = 8;
+
+  // Message timestamp (UTC milliseconds since epoch)
+  int64 timestamp_utc = 9;
+
+  // Additional headers/metadata
+  map<string, string> headers = 10;
 }
 
-// Request message expecting a correlated response
-message Request {
-  string correlation_id = 1;   // GUID for correlating response
-  string method = 2;           // Method/handler name to invoke
-  bytes payload = 3;           // Serialized request payload
-  optional int32 timeout_ms = 4;
-  map<string, string> headers = 5;
-}
+// Problem details for error responses (similar to RFC 7807)
+// https://datatracker.ietf.org/doc/html/rfc7807
+message ProblemDetails {
+  // URI reference identifying the problem type
+  // e.g., "https://example.com/errors/validation-failed"
+  string type = 1;
 
-// Response message correlated to a request
-message Response {
-  string correlation_id = 1;   // Must match the request's correlation_id
-  StatusCode status = 2;
-  bytes payload = 3;           // Serialized response payload
-  optional string error = 4;
-  optional int32 error_code = 5;
-  int64 duration_ms = 6;
-  map<string, string> headers = 7;
-}
+  // Short, human-readable summary of the problem
+  // e.g., "Validation Failed"
+  string title = 2;
 
-// Fire-and-forget notification (no response expected)
-message Notification {
-  string topic = 1;
-  bytes payload = 2;
-  map<string, string> headers = 3;
+  // HTTP-style status code (for interoperability)
+  int32 status = 3;
+
+  // Human-readable explanation specific to this occurrence
+  // e.g., "The 'email' field must be a valid email address"
+  string detail = 4;
+
+  // URI reference identifying the specific occurrence
+  // e.g., "https://example.com/errors/12345"
+  string instance = 5;
+
+  // Application-specific error code
+  string code = 6;
+
+  // Stack trace (only in development/debug mode)
+  string trace = 7;
+
+  // Additional error properties
+  map<string, string> extensions = 8;
+
+  // Nested/inner errors for error chains
+  repeated ProblemDetails errors = 9;
 }
 
 // Response status codes
@@ -61,4 +102,6 @@ enum StatusCode {
   STATUS_CODE_CANCELLED = 5;
   STATUS_CODE_UNAUTHORIZED = 6;
   STATUS_CODE_INVALID_REQUEST = 7;
+  STATUS_CODE_UNAVAILABLE = 8;
+  STATUS_CODE_INTERNAL = 9;
 }

@@ -12,11 +12,9 @@ namespace GrpcChannel.Client;
 /// Supports bidirectional request/response with handler registration.
 /// </summary>
 /// <param name="options">Connection options.</param>
-/// <param name="serializer">Payload serializer.</param>
 /// <param name="logger">Optional logger.</param>
 public sealed class DuplexClient(
     DuplexClientOptions options,
-    IPayloadSerializer serializer,
     ILogger<DuplexClient>? logger = null) : IAsyncDisposable
 {
     private GrpcChannel? _grpcChannel;
@@ -81,21 +79,24 @@ public sealed class DuplexClient(
 
         // Create the duplex channel
         var channelId = Guid.NewGuid().ToString("N");
-        _duplexChannel = new DuplexChannel(channelId, serializer);
+        _duplexChannel = new DuplexChannel(channelId);
 
         // Attach the sender
-        _duplexChannel.AttachSender(async (message, ct) =>
-        {
-            await _writeLock!.WaitAsync(ct);
-            try
+        _duplexChannel.AttachSender(
+            async (message, ct) =>
             {
-                await _streamingCall.RequestStream.WriteAsync(message, ct);
-            }
-            finally
-            {
-                _writeLock.Release();
-            }
-        }, "server");
+                await _writeLock!.WaitAsync(ct);
+                try
+                {
+                    await _streamingCall.RequestStream.WriteAsync(message, ct);
+                }
+                finally
+                {
+                    _writeLock.Release();
+                }
+            },
+            "server",
+            includeStackTrace: options.IncludeStackTrace);
 
         // Start receiving messages
         _receiveTask = ReceiveMessagesAsync(_connectionCts.Token);
@@ -193,14 +194,16 @@ public sealed class DuplexClient(
 /// <param name="ServerAddress">Server address (e.g., "https://localhost:5001").</param>
 /// <param name="ClientId">Client identifier.</param>
 /// <param name="Metadata">Optional connection metadata.</param>
+/// <param name="IncludeStackTrace">Include stack traces in error responses.</param>
 public sealed record DuplexClientOptions(
     string ServerAddress,
     string ClientId,
-    IReadOnlyDictionary<string, string>? Metadata = null)
+    IReadOnlyDictionary<string, string>? Metadata = null,
+    bool IncludeStackTrace = false)
 {
     /// <summary>
     /// Creates options for local development.
     /// </summary>
     public static DuplexClientOptions ForLocalDevelopment(string? clientId = null, int port = 5001) =>
-        new($"https://localhost:{port}", clientId ?? $"client-{Environment.ProcessId}");
+        new($"https://localhost:{port}", clientId ?? $"client-{Environment.ProcessId}", IncludeStackTrace: true);
 }

@@ -9,6 +9,8 @@ A modern .NET 10 implementation of a full-duplex gRPC protocol where **both clie
 - **Non-Blocking**: Async handlers with proper cancellation support
 - **Handler Registration**: Fluent API for registering typed request handlers
 - **Fire-and-Forget Notifications**: Support for one-way messages
+- **`google.protobuf.Any` Payloads**: Type-safe, AOT-compatible message payloads
+- **RFC 7807 ProblemDetails**: Standardized error responses with detailed problem information
 - **Modern C# Features**: Records, nullable reference types, primary constructors
 - **AOT Compatible**: Native AOT publishing support
 - **Modern Solution Format**: Uses the new `.slnx` XML-based solution file format
@@ -53,8 +55,10 @@ A modern .NET 10 implementation of a full-duplex gRPC protocol where **both clie
 prototypes/grpc-bidirectional-channel/
 ├── src/
 │   ├── GrpcChannel.Protocol/       # Shared protocol library
-│   │   ├── Contracts/              # IDuplexChannel, IPayloadSerializer
-│   │   ├── Protos/                 # gRPC proto definitions
+│   │   ├── Contracts/              # IDuplexChannel, DuplexResult, ProblemDetails
+│   │   ├── Protos/
+│   │   │   ├── channel.proto       # Core DuplexMessage with Any + ProblemDetails
+│   │   │   └── messages.proto      # Sample request/response message types
 │   │   └── DuplexChannel.cs        # Core channel implementation
 │   ├── GrpcChannel.Server/         # gRPC server implementation
 │   │   ├── Services/               # DuplexServiceImpl, ConnectionRegistry
@@ -98,49 +102,98 @@ dotnet run --project src/GrpcChannel.Server
 dotnet run --project src/GrpcChannel.Client
 ```
 
-## Protocol Messages
+## Protocol Design
 
-| Type | Description |
-|------|-------------|
-| `Request` | Expects a correlated response (has `correlation_id`) |
-| `Response` | Correlates to a request via `correlation_id` |
-| `Notification` | Fire-and-forget, no response expected |
+### Single Message Format
 
-### Response Status Codes
+The protocol uses a single unified `DuplexMessage` type with `google.protobuf.Any` for payloads:
 
-| Status | Description |
-|--------|-------------|
-| `Ok` | Request completed successfully |
-| `Error` | General error occurred |
-| `NotFound` | Method/handler not found |
-| `Timeout` | Request timed out |
-| `Cancelled` | Request was cancelled |
-| `Unauthorized` | Not authorized |
-| `InvalidRequest` | Request was malformed |
+```protobuf
+message DuplexMessage {
+  string id = 1;                    // Unique message ID
+  string correlation_id = 2;        // Links responses to requests
+  string method = 3;                // Handler method name
+  google.protobuf.Any payload = 4;  // Type-safe protobuf payload
+  StatusCode status = 5;            // Response status
+  ProblemDetails problem = 6;       // Error details (RFC 7807)
+  int32 timeout_ms = 7;             // Request timeout
+  int64 duration_ms = 8;            // Processing time
+  int64 timestamp_utc = 9;          // Message timestamp
+  map<string, string> headers = 10; // Custom headers
+}
+```
+
+### Message Type Inference
+
+Message type is inferred from field presence (no explicit type field needed):
+
+| Type | Has `method` | Has `correlation_id` |
+|------|--------------|---------------------|
+| **Request** | ✓ | ✓ |
+| **Response** | ✗ | ✓ |
+| **Notification** | ✓ | ✗ |
+
+### ProblemDetails (RFC 7807)
+
+Error responses include structured problem details:
+
+```protobuf
+message ProblemDetails {
+  string type = 1;                    // URI reference (e.g., "urn:grpc:duplex:timeout")
+  string title = 2;                   // Human-readable summary
+  int32 status = 3;                   // Status code
+  string detail = 4;                  // Detailed explanation
+  string instance = 5;                // Occurrence URI
+  string code = 6;                    // Application error code
+  string trace = 7;                   // Stack trace (debug only)
+  map<string, string> extensions = 8; // Additional properties
+  repeated ProblemDetails errors = 9; // Nested errors (for chains)
+}
+```
+
+### Status Codes
+
+| Status | Code | Description |
+|--------|------|-------------|
+| `Ok` | 1 | Request completed successfully |
+| `Error` | 2 | General error occurred |
+| `NotFound` | 3 | Method/handler not found |
+| `Timeout` | 4 | Request timed out |
+| `Cancelled` | 5 | Request was cancelled |
+| `Unauthorized` | 6 | Not authorized |
+| `InvalidRequest` | 7 | Request was malformed |
+| `Unavailable` | 8 | Service unavailable |
+| `Internal` | 9 | Internal error |
 
 ## Code Examples
 
 ### Client: Sending Requests to Server
 
 ```csharp
-await using var client = new DuplexClient(options, serializer);
+await using var client = new DuplexClient(options);
 await client.ConnectAsync();
 
 // Send typed request, await typed response
 var result = await client.Channel.SendRequestAsync<EchoRequest, EchoResponse>(
     "echo",
-    new EchoRequest("Hello!"));
+    new EchoRequest { Message = "Hello!" });
 
 if (result.IsSuccess)
 {
     Console.WriteLine($"Echo: {result.Value!.Message}");
     Console.WriteLine($"RTT: {result.DurationMs}ms");
 }
+else
+{
+    // Access RFC 7807 problem details
+    Console.WriteLine($"Error: {result.Problem?.Detail}");
+    Console.WriteLine($"Code: {result.Problem?.Code}");
+}
 
 // With timeout
 var mathResult = await client.Channel.SendRequestAsync<MathRequest, MathResponse>(
     "math",
-    new MathRequest("multiply", 6, 7),
+    new MathRequest { Operation = "multiply", A = 6, B = 7 },
     timeoutMs: 5000);
 ```
 
@@ -152,17 +205,20 @@ client.Channel.OnRequest<GetClientInfoRequest, ClientInfoResponse>(
     "client.info",
     async (request, ctx, ct) =>
     {
-        return new ClientInfoResponse(
-            Environment.MachineName,
-            Environment.ProcessId);
+        return new ClientInfoResponse
+        {
+            MachineName = Environment.MachineName,
+            ProcessId = Environment.ProcessId,
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
     });
 
 // Handle notifications
-client.Channel.OnNotification<BroadcastMessage>(
+client.Channel.OnNotification<BroadcastNotification>(
     "broadcast",
-    async (message, ctx, ct) =>
+    async (notification, ctx, ct) =>
     {
-        Console.WriteLine($"Broadcast: {message.Text}");
+        Console.WriteLine($"Broadcast: {notification.Message}");
     });
 ```
 
@@ -173,7 +229,11 @@ registry.OnAllChannels(channel =>
 {
     channel.OnRequest<EchoRequest, EchoResponse>("echo", async (req, ctx, ct) =>
     {
-        return new EchoResponse(req.Message, DateTimeOffset.UtcNow);
+        return new EchoResponse
+        {
+            Message = req.Message,
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
     });
 
     channel.OnRequest<MathRequest, MathResponse>("math", async (req, ctx, ct) =>
@@ -184,7 +244,7 @@ registry.OnAllChannels(channel =>
             "multiply" => req.A * req.B,
             _ => double.NaN
         };
-        return new MathResponse(result);
+        return new MathResponse { Result = result, Operation = req.Operation };
     });
 });
 ```
@@ -196,23 +256,32 @@ registry.OnAllChannels(channel =>
 var clientChannel = registry.GetChannelByClientId("client-123");
 
 // Server initiates request to client
-var info = await clientChannel!.SendRequestAsync<GetClientInfoRequest, ClientInfoResponse>(
+var result = await clientChannel!.SendRequestAsync<GetClientInfoRequest, ClientInfoResponse>(
     "client.info",
     new GetClientInfoRequest());
 
-Console.WriteLine($"Client machine: {info.Value!.MachineName}");
+if (result.IsSuccess)
+{
+    Console.WriteLine($"Client machine: {result.Value!.MachineName}");
+}
 ```
 
 ### Fire-and-Forget Notifications
 
 ```csharp
 // Send notification (no response)
-await channel.SendNotificationAsync("client.event", new EventData("startup"));
+await channel.SendNotificationAsync("client.event",
+    new ClientEventNotification
+    {
+        EventType = "startup",
+        Data = "Ready"
+    });
 
 // Broadcast to all clients
 foreach (var client in registry.GetAllChannels())
 {
-    await client.Channel.SendNotificationAsync("broadcast", new Message("Hello all!"));
+    await client.Channel.SendNotificationAsync("broadcast",
+        new BroadcastNotification { Message = "Hello all!" });
 }
 ```
 
@@ -221,21 +290,24 @@ foreach (var client in registry.GetAllChannels())
 ```
 Client                                Server
   │                                     │
-  │──── Request ────────────────────────▶│
-  │     correlation_id: "abc123"        │
-  │     method: "echo"                  │
-  │     payload: {...}                  │
+  │──── DuplexMessage ─────────────────▶│
+  │     id: "msg-456"                  │
+  │     correlation_id: "abc123"       │
+  │     method: "echo"                 │
+  │     payload: Any<EchoRequest>      │
   │                                     │
   │     [Client stores pending          │
   │      request with "abc123"]         │
   │                                     │
   │                                     │──── Handler invoked
   │                                     │     for "echo" method
+  │                                     │     Unpacks Any<EchoRequest>
   │                                     │
-  │◀──── Response ──────────────────────│
+  │◀──── DuplexMessage ────────────────│
+  │      id: "msg-789"                  │
   │      correlation_id: "abc123"       │
   │      status: OK                     │
-  │      payload: {...}                 │
+  │      payload: Any<EchoResponse>     │
   │                                     │
   │     [Client matches "abc123"        │
   │      completes awaiting Task]       │
@@ -244,14 +316,24 @@ Client                                Server
 
 ## Modern C# Features Used
 
-### Records for DTOs
+### Protobuf Messages with `google.protobuf.Any`
 
-```csharp
-public sealed record EchoRequest(string Message);
-public sealed record EchoResponse(string Message, DateTimeOffset Timestamp);
+```protobuf
+// messages.proto - Sample message definitions
+message EchoRequest {
+  string message = 1;
+}
 
-public sealed record MathRequest(string Operation, double A, double B);
-public sealed record MathResponse(double Result);
+message EchoResponse {
+  string message = 1;
+  int64 timestamp_utc = 2;
+}
+
+message MathRequest {
+  string operation = 1;
+  double a = 2;
+  double b = 3;
+}
 ```
 
 ### Primary Constructors
@@ -259,7 +341,6 @@ public sealed record MathResponse(double Result);
 ```csharp
 public sealed class DuplexClient(
     DuplexClientOptions options,
-    IPayloadSerializer serializer,
     ILogger<DuplexClient>? logger = null) : IAsyncDisposable
 {
     // Fields available directly from constructor parameters
@@ -272,11 +353,11 @@ public sealed class DuplexClient(
 channel.OnRequest<TRequest, TResponse>("method", async (request, context, ct) =>
 {
     // Non-blocking async handler
-    return new TResponse(...);
+    return new TResponse { /* ... */ };
 });
 ```
 
-### Result Types
+### Result Types with ProblemDetails
 
 ```csharp
 var result = await channel.SendRequestAsync<Req, Res>("method", request);
@@ -287,11 +368,15 @@ if (result.IsSuccess)
 }
 else
 {
-    Console.WriteLine($"Failed: {result.Status} - {result.Error}");
+    // RFC 7807 compliant error details
+    Console.WriteLine($"Status: {result.Status}");
+    Console.WriteLine($"Title: {result.Problem?.Title}");
+    Console.WriteLine($"Detail: {result.Problem?.Detail}");
+    Console.WriteLine($"Code: {result.Problem?.Code}");
 }
 
 // Or throw on failure
-var value = result.GetValueOrThrow();
+var value = result.GetValueOrThrow();  // Throws DuplexException
 ```
 
 ## Built-in Server Methods

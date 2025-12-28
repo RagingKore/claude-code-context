@@ -33,18 +33,8 @@ public interface IDuplexChannel : IAsyncDisposable
         int? timeoutMs = null,
         IReadOnlyDictionary<string, string>? headers = null,
         CancellationToken cancellationToken = default)
-        where TRequest : class
-        where TResponse : class;
-
-    /// <summary>
-    /// Sends a request with raw bytes and awaits the correlated response.
-    /// </summary>
-    ValueTask<DuplexResult<byte[]>> SendRequestAsync(
-        string method,
-        byte[] payload,
-        int? timeoutMs = null,
-        IReadOnlyDictionary<string, string>? headers = null,
-        CancellationToken cancellationToken = default);
+        where TRequest : IMessage
+        where TResponse : IMessage, new();
 
     /// <summary>
     /// Sends a fire-and-forget notification (no response expected).
@@ -54,16 +44,7 @@ public interface IDuplexChannel : IAsyncDisposable
         T payload,
         IReadOnlyDictionary<string, string>? headers = null,
         CancellationToken cancellationToken = default)
-        where T : class;
-
-    /// <summary>
-    /// Sends a fire-and-forget notification with raw bytes.
-    /// </summary>
-    ValueTask SendNotificationAsync(
-        string topic,
-        byte[] payload,
-        IReadOnlyDictionary<string, string>? headers = null,
-        CancellationToken cancellationToken = default);
+        where T : IMessage;
 
     /// <summary>
     /// Registers a request handler for a specific method.
@@ -76,15 +57,8 @@ public interface IDuplexChannel : IAsyncDisposable
     IDisposable OnRequest<TRequest, TResponse>(
         string method,
         Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler)
-        where TRequest : class
-        where TResponse : class;
-
-    /// <summary>
-    /// Registers a request handler with raw bytes.
-    /// </summary>
-    IDisposable OnRequest(
-        string method,
-        Func<byte[], RequestContext, CancellationToken, ValueTask<byte[]>> handler);
+        where TRequest : IMessage, new()
+        where TResponse : IMessage;
 
     /// <summary>
     /// Registers a notification handler for a specific topic.
@@ -96,20 +70,18 @@ public interface IDuplexChannel : IAsyncDisposable
     IDisposable OnNotification<T>(
         string topic,
         Func<T, NotificationContext, CancellationToken, ValueTask> handler)
-        where T : class;
-
-    /// <summary>
-    /// Registers a notification handler with raw bytes.
-    /// </summary>
-    IDisposable OnNotification(
-        string topic,
-        Func<byte[], NotificationContext, CancellationToken, ValueTask> handler);
+        where T : IMessage, new();
 
     /// <summary>
     /// Event raised when the connection state changes.
     /// </summary>
     event EventHandler<ChannelStateChangedEventArgs>? StateChanged;
 }
+
+/// <summary>
+/// Marker interface for protobuf messages.
+/// </summary>
+public interface IMessage;
 
 /// <summary>
 /// Result of a duplex request.
@@ -119,8 +91,7 @@ public readonly record struct DuplexResult<T>(
     bool IsSuccess,
     T? Value,
     StatusCode Status,
-    string? Error = null,
-    int? ErrorCode = null,
+    ProblemDetails? Problem = null,
     long DurationMs = 0,
     IReadOnlyDictionary<string, string>? Headers = null)
 {
@@ -128,19 +99,108 @@ public readonly record struct DuplexResult<T>(
     /// Creates a successful result.
     /// </summary>
     public static DuplexResult<T> Ok(T value, long durationMs = 0, IReadOnlyDictionary<string, string>? headers = null) =>
-        new(true, value, StatusCode.Ok, null, null, durationMs, headers);
+        new(true, value, StatusCode.Ok, null, durationMs, headers);
 
     /// <summary>
     /// Creates a failed result.
     /// </summary>
-    public static DuplexResult<T> Fail(StatusCode status, string error, int? errorCode = null, long durationMs = 0) =>
-        new(false, default, status, error, errorCode, durationMs, null);
+    public static DuplexResult<T> Fail(StatusCode status, ProblemDetails problem, long durationMs = 0) =>
+        new(false, default, status, problem, durationMs, null);
+
+    /// <summary>
+    /// Creates a failed result with a simple error message.
+    /// </summary>
+    public static DuplexResult<T> Fail(StatusCode status, string error, string? code = null, long durationMs = 0) =>
+        new(false, default, status, ProblemDetails.FromError(status, error, code), durationMs, null);
 
     /// <summary>
     /// Gets the value or throws if not successful.
     /// </summary>
     public T GetValueOrThrow() =>
-        IsSuccess ? Value! : throw new DuplexException(Status, Error ?? "Unknown error", ErrorCode);
+        IsSuccess ? Value! : throw new DuplexException(Status, Problem ?? ProblemDetails.FromError(Status, "Unknown error"));
+}
+
+/// <summary>
+/// Problem details for error responses (RFC 7807 compatible).
+/// </summary>
+/// <param name="Type">URI reference identifying the problem type.</param>
+/// <param name="Title">Short, human-readable summary.</param>
+/// <param name="Status">HTTP-style status code.</param>
+/// <param name="Detail">Human-readable explanation.</param>
+/// <param name="Instance">URI identifying this occurrence.</param>
+/// <param name="Code">Application-specific error code.</param>
+/// <param name="Trace">Stack trace (debug only).</param>
+/// <param name="Extensions">Additional properties.</param>
+/// <param name="Errors">Nested errors for error chains.</param>
+public sealed record ProblemDetails(
+    string? Type = null,
+    string? Title = null,
+    int? Status = null,
+    string? Detail = null,
+    string? Instance = null,
+    string? Code = null,
+    string? Trace = null,
+    IReadOnlyDictionary<string, string>? Extensions = null,
+    IReadOnlyList<ProblemDetails>? Errors = null)
+{
+    /// <summary>
+    /// Creates a problem details from a status and error message.
+    /// </summary>
+    public static ProblemDetails FromError(StatusCode status, string detail, string? code = null) =>
+        new(
+            Type: $"urn:grpc:duplex:{status.ToString().ToLowerInvariant()}",
+            Title: status.ToTitle(),
+            Status: (int)status,
+            Detail: detail,
+            Code: code);
+
+    /// <summary>
+    /// Creates a problem details from an exception.
+    /// </summary>
+    public static ProblemDetails FromException(Exception ex, bool includeTrace = false) =>
+        new(
+            Type: $"urn:grpc:duplex:error",
+            Title: "An error occurred",
+            Status: (int)StatusCode.Error,
+            Detail: ex.Message,
+            Code: ex.GetType().Name,
+            Trace: includeTrace ? ex.StackTrace : null,
+            Errors: ex.InnerException is not null
+                ? [FromException(ex.InnerException, includeTrace)]
+                : null);
+
+    /// <summary>
+    /// Creates a not found problem details.
+    /// </summary>
+    public static ProblemDetails NotFound(string method) =>
+        new(
+            Type: "urn:grpc:duplex:not-found",
+            Title: "Method Not Found",
+            Status: (int)StatusCode.NotFound,
+            Detail: $"Method '{method}' was not found",
+            Code: "METHOD_NOT_FOUND");
+
+    /// <summary>
+    /// Creates a timeout problem details.
+    /// </summary>
+    public static ProblemDetails Timeout(int timeoutMs) =>
+        new(
+            Type: "urn:grpc:duplex:timeout",
+            Title: "Request Timeout",
+            Status: (int)StatusCode.Timeout,
+            Detail: $"Request timed out after {timeoutMs}ms",
+            Code: "TIMEOUT");
+
+    /// <summary>
+    /// Creates a cancelled problem details.
+    /// </summary>
+    public static ProblemDetails Cancelled() =>
+        new(
+            Type: "urn:grpc:duplex:cancelled",
+            Title: "Request Cancelled",
+            Status: (int)StatusCode.Cancelled,
+            Detail: "The request was cancelled",
+            Code: "CANCELLED");
 }
 
 /// <summary>
@@ -155,7 +215,32 @@ public enum StatusCode
     Timeout = 4,
     Cancelled = 5,
     Unauthorized = 6,
-    InvalidRequest = 7
+    InvalidRequest = 7,
+    Unavailable = 8,
+    Internal = 9
+}
+
+/// <summary>
+/// Extension methods for StatusCode.
+/// </summary>
+public static class StatusCodeExtensions
+{
+    /// <summary>
+    /// Gets a human-readable title for the status code.
+    /// </summary>
+    public static string ToTitle(this StatusCode status) => status switch
+    {
+        StatusCode.Ok => "OK",
+        StatusCode.Error => "Error",
+        StatusCode.NotFound => "Not Found",
+        StatusCode.Timeout => "Timeout",
+        StatusCode.Cancelled => "Cancelled",
+        StatusCode.Unauthorized => "Unauthorized",
+        StatusCode.InvalidRequest => "Invalid Request",
+        StatusCode.Unavailable => "Service Unavailable",
+        StatusCode.Internal => "Internal Error",
+        _ => "Unknown"
+    };
 }
 
 /// <summary>
@@ -164,13 +249,11 @@ public enum StatusCode
 /// <param name="CorrelationId">The correlation ID of the request.</param>
 /// <param name="Method">The method being invoked.</param>
 /// <param name="Headers">Request headers.</param>
-/// <param name="Metadata">Channel metadata.</param>
 /// <param name="RemoteId">Remote endpoint identifier.</param>
 public sealed record RequestContext(
     string CorrelationId,
     string Method,
     IReadOnlyDictionary<string, string> Headers,
-    IReadOnlyDictionary<string, string> Metadata,
     string? RemoteId = null);
 
 /// <summary>
@@ -178,12 +261,10 @@ public sealed record RequestContext(
 /// </summary>
 /// <param name="Topic">The notification topic.</param>
 /// <param name="Headers">Notification headers.</param>
-/// <param name="Metadata">Channel metadata.</param>
 /// <param name="RemoteId">Remote endpoint identifier.</param>
 public sealed record NotificationContext(
     string Topic,
     IReadOnlyDictionary<string, string> Headers,
-    IReadOnlyDictionary<string, string> Metadata,
     string? RemoteId = null);
 
 /// <summary>
@@ -213,10 +294,9 @@ public enum ChannelState
 /// Exception thrown when a duplex operation fails.
 /// </summary>
 /// <param name="status">The status code.</param>
-/// <param name="message">The error message.</param>
-/// <param name="errorCode">Optional error code.</param>
-public sealed class DuplexException(StatusCode status, string message, int? errorCode = null)
-    : Exception(message)
+/// <param name="problem">The problem details.</param>
+public sealed class DuplexException(StatusCode status, ProblemDetails problem)
+    : Exception(problem.Detail ?? problem.Title ?? "Unknown error")
 {
     /// <summary>
     /// The status code of the failure.
@@ -224,7 +304,7 @@ public sealed class DuplexException(StatusCode status, string message, int? erro
     public StatusCode Status { get; } = status;
 
     /// <summary>
-    /// Optional application-specific error code.
+    /// The problem details.
     /// </summary>
-    public int? ErrorCode { get; } = errorCode;
+    public ProblemDetails Problem { get; } = problem;
 }

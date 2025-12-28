@@ -11,12 +11,12 @@ namespace GrpcChannel.Server.Services;
 /// Manages connections and provides bidirectional RPC for both sides.
 /// </summary>
 /// <param name="logger">Logger instance.</param>
-/// <param name="serializer">Payload serializer.</param>
 /// <param name="connectionRegistry">Connection registry for tracking active channels.</param>
+/// <param name="hostEnvironment">Host environment for determining debug mode.</param>
 public sealed class DuplexServiceImpl(
     ILogger<DuplexServiceImpl> logger,
-    IPayloadSerializer serializer,
-    IConnectionRegistry connectionRegistry) : DuplexService.DuplexServiceBase
+    IConnectionRegistry connectionRegistry,
+    IHostEnvironment hostEnvironment) : DuplexService.DuplexServiceBase
 {
     /// <summary>
     /// Opens a bidirectional duplex channel.
@@ -31,22 +31,25 @@ public sealed class DuplexServiceImpl(
 
         logger.LogInformation("Client {ClientId} connected, channel {ChannelId}", clientId, channelId);
 
-        var channel = new DuplexChannel(channelId, serializer);
+        var channel = new DuplexChannel(channelId);
 
         // Attach the gRPC stream as the sender
         var writeLock = new SemaphoreSlim(1, 1);
-        channel.AttachSender(async (message, ct) =>
-        {
-            await writeLock.WaitAsync(ct);
-            try
+        channel.AttachSender(
+            async (message, ct) =>
             {
-                await responseStream.WriteAsync(message, ct);
-            }
-            finally
-            {
-                writeLock.Release();
-            }
-        }, clientId);
+                await writeLock.WaitAsync(ct);
+                try
+                {
+                    await responseStream.WriteAsync(message, ct);
+                }
+                finally
+                {
+                    writeLock.Release();
+                }
+            },
+            clientId,
+            includeStackTrace: hostEnvironment.IsDevelopment());
 
         // Register with the connection registry
         connectionRegistry.Register(channelId, channel, clientId);

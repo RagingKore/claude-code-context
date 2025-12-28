@@ -1,28 +1,33 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Text.Json;
 using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
 using GrpcChannel.Protocol.Contracts;
 using GrpcChannel.Protocol.Protos;
+using ProtoStatusCode = GrpcChannel.Protocol.Protos.StatusCode;
+using StatusCode = GrpcChannel.Protocol.Contracts.StatusCode;
+using ProtoProblemDetails = GrpcChannel.Protocol.Protos.ProblemDetails;
+using ProblemDetails = GrpcChannel.Protocol.Contracts.ProblemDetails;
 
 namespace GrpcChannel.Protocol;
 
 /// <summary>
 /// Core duplex channel implementation providing bidirectional request/response
 /// with handler registration. This class is used by both client and server.
+/// Uses protobuf Any for typed message payloads.
 /// </summary>
 /// <param name="channelId">Unique channel identifier.</param>
-/// <param name="serializer">Payload serializer.</param>
-public sealed class DuplexChannel(string channelId, IPayloadSerializer serializer) : IDuplexChannel
+public sealed class DuplexChannel(string channelId) : IDuplexChannel
 {
     private readonly ConcurrentDictionary<string, PendingRequest> _pendingRequests = new();
-    private readonly ConcurrentDictionary<string, RequestHandler> _requestHandlers = new();
-    private readonly ConcurrentDictionary<string, NotificationHandler> _notificationHandlers = new();
+    private readonly ConcurrentDictionary<string, IRequestHandler> _requestHandlers = new();
+    private readonly ConcurrentDictionary<string, INotificationHandler> _notificationHandlers = new();
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     private Func<DuplexMessage, CancellationToken, ValueTask>? _sendFunc;
     private ChannelState _state = ChannelState.Disconnected;
     private string? _remoteId;
+    private bool _includeStackTrace;
 
     public string ChannelId { get; } = channelId;
     public bool IsConnected => _state == ChannelState.Connected;
@@ -33,10 +38,14 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
     /// Attaches the send function for outgoing messages.
     /// Called by transport layer (gRPC streaming).
     /// </summary>
-    public void AttachSender(Func<DuplexMessage, CancellationToken, ValueTask> sendFunc, string? remoteId = null)
+    public void AttachSender(
+        Func<DuplexMessage, CancellationToken, ValueTask> sendFunc,
+        string? remoteId = null,
+        bool includeStackTrace = false)
     {
         _sendFunc = sendFunc;
         _remoteId = remoteId;
+        _includeStackTrace = includeStackTrace;
         SetState(ChannelState.Connected);
     }
 
@@ -45,19 +54,28 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
     /// </summary>
     public async ValueTask ProcessIncomingAsync(DuplexMessage message, CancellationToken cancellationToken = default)
     {
-        switch (message.ContentCase)
+        // Determine message type based on fields:
+        // - Response: has correlation_id, no method (response to a request)
+        // - Request: has correlation_id and method (expects response)
+        // - Notification: has method, no correlation_id (fire-and-forget)
+
+        var hasCorrelationId = !string.IsNullOrEmpty(message.CorrelationId);
+        var hasMethod = !string.IsNullOrEmpty(message.Method);
+
+        if (hasCorrelationId && !hasMethod)
         {
-            case DuplexMessage.ContentOneofCase.Request:
-                await HandleIncomingRequestAsync(message, cancellationToken);
-                break;
-
-            case DuplexMessage.ContentOneofCase.Response:
-                HandleIncomingResponse(message.Response);
-                break;
-
-            case DuplexMessage.ContentOneofCase.Notification:
-                await HandleIncomingNotificationAsync(message, cancellationToken);
-                break;
+            // This is a response
+            HandleIncomingResponse(message);
+        }
+        else if (hasCorrelationId && hasMethod)
+        {
+            // This is a request expecting a response
+            await HandleIncomingRequestAsync(message, cancellationToken);
+        }
+        else if (hasMethod)
+        {
+            // This is a notification (fire-and-forget)
+            await HandleIncomingNotificationAsync(message, cancellationToken);
         }
     }
 
@@ -67,33 +85,14 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
         int? timeoutMs = null,
         IReadOnlyDictionary<string, string>? headers = null,
         CancellationToken cancellationToken = default)
-        where TRequest : class
-        where TResponse : class
-    {
-        var payload = serializer.Serialize(request);
-        var result = await SendRequestAsync(method, payload, timeoutMs, headers, cancellationToken);
-
-        if (!result.IsSuccess)
-        {
-            return DuplexResult<TResponse>.Fail(result.Status, result.Error ?? "Unknown error", result.ErrorCode, result.DurationMs);
-        }
-
-        var response = serializer.Deserialize<TResponse>(result.Value!);
-        return DuplexResult<TResponse>.Ok(response, result.DurationMs, result.Headers);
-    }
-
-    public async ValueTask<DuplexResult<byte[]>> SendRequestAsync(
-        string method,
-        byte[] payload,
-        int? timeoutMs = null,
-        IReadOnlyDictionary<string, string>? headers = null,
-        CancellationToken cancellationToken = default)
+        where TRequest : Contracts.IMessage
+        where TResponse : Contracts.IMessage, new()
     {
         EnsureConnected();
 
         var correlationId = Guid.NewGuid().ToString("N");
-        var tcs = new TaskCompletionSource<Response>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var pending = new PendingRequest(correlationId, tcs, Stopwatch.StartNew());
+        var tcs = new TaskCompletionSource<DuplexMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = new PendingRequest(correlationId, tcs, Stopwatch.StartNew(), timeoutMs);
 
         if (!_pendingRequests.TryAdd(correlationId, pending))
         {
@@ -105,25 +104,27 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
             var message = new DuplexMessage
             {
                 Id = Guid.NewGuid().ToString("N"),
-                TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                Request = new Request
-                {
-                    CorrelationId = correlationId,
-                    Method = method,
-                    Payload = ByteString.CopyFrom(payload)
-                }
+                CorrelationId = correlationId,
+                Method = method,
+                TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
+
+            // Pack the request into Any
+            if (request is Google.Protobuf.IMessage protoRequest)
+            {
+                message.Payload = Any.Pack(protoRequest);
+            }
 
             if (timeoutMs.HasValue)
             {
-                message.Request.TimeoutMs = timeoutMs.Value;
+                message.TimeoutMs = timeoutMs.Value;
             }
 
             if (headers is not null)
             {
                 foreach (var kvp in headers)
                 {
-                    message.Request.Headers[kvp.Key] = kvp.Value;
+                    message.Headers[kvp.Key] = kvp.Value;
                 }
             }
 
@@ -134,14 +135,11 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
                 ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
                 : null;
 
-            if (cts is not null)
-            {
-                cts.CancelAfter(timeoutMs!.Value);
-            }
+            cts?.CancelAfter(timeoutMs!.Value);
 
             var effectiveToken = cts?.Token ?? cancellationToken;
 
-            using var registration = effectiveToken.Register(() =>
+            await using var registration = effectiveToken.Register(() =>
             {
                 if (_pendingRequests.TryRemove(correlationId, out var removed))
                 {
@@ -157,25 +155,37 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
                 ? new Dictionary<string, string>(response.Headers)
                 : null;
 
-            return response.Status == Protos.StatusCode.Ok
-                ? DuplexResult<byte[]>.Ok(response.Payload.ToByteArray(), pending.Stopwatch.ElapsedMilliseconds, responseHeaders)
-                : DuplexResult<byte[]>.Fail(
-                    MapStatus(response.Status),
-                    response.Error ?? "Unknown error",
-                    response.HasErrorCode ? response.ErrorCode : null,
-                    pending.Stopwatch.ElapsedMilliseconds);
+            if (response.Status == ProtoStatusCode.Ok)
+            {
+                // Unpack the response from Any
+                var responsePayload = response.Payload?.Unpack<TResponse>()
+                    ?? throw new InvalidOperationException("Response payload is null");
+
+                return DuplexResult<TResponse>.Ok(responsePayload, pending.Stopwatch.ElapsedMilliseconds, responseHeaders);
+            }
+
+            return DuplexResult<TResponse>.Fail(
+                MapStatus(response.Status),
+                MapProblemDetails(response.Problem),
+                pending.Stopwatch.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) when (timeoutMs.HasValue)
         {
             pending.Stopwatch.Stop();
             _pendingRequests.TryRemove(correlationId, out _);
-            return DuplexResult<byte[]>.Fail(StatusCode.Timeout, "Request timed out", durationMs: pending.Stopwatch.ElapsedMilliseconds);
+            return DuplexResult<TResponse>.Fail(
+                StatusCode.Timeout,
+                ProblemDetails.Timeout(timeoutMs.Value),
+                pending.Stopwatch.ElapsedMilliseconds);
         }
         catch (OperationCanceledException)
         {
             pending.Stopwatch.Stop();
             _pendingRequests.TryRemove(correlationId, out _);
-            return DuplexResult<byte[]>.Fail(StatusCode.Cancelled, "Request was cancelled", durationMs: pending.Stopwatch.ElapsedMilliseconds);
+            return DuplexResult<TResponse>.Fail(
+                StatusCode.Cancelled,
+                ProblemDetails.Cancelled(),
+                pending.Stopwatch.ElapsedMilliseconds);
         }
     }
 
@@ -184,36 +194,28 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
         T payload,
         IReadOnlyDictionary<string, string>? headers = null,
         CancellationToken cancellationToken = default)
-        where T : class
-    {
-        var bytes = serializer.Serialize(payload);
-        await SendNotificationAsync(topic, bytes, headers, cancellationToken);
-    }
-
-    public async ValueTask SendNotificationAsync(
-        string topic,
-        byte[] payload,
-        IReadOnlyDictionary<string, string>? headers = null,
-        CancellationToken cancellationToken = default)
+        where T : Contracts.IMessage
     {
         EnsureConnected();
 
         var message = new DuplexMessage
         {
             Id = Guid.NewGuid().ToString("N"),
-            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            Notification = new Notification
-            {
-                Topic = topic,
-                Payload = ByteString.CopyFrom(payload)
-            }
+            Method = topic, // For notifications, method is the topic
+            // No correlation_id for notifications
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         };
+
+        if (payload is Google.Protobuf.IMessage protoPayload)
+        {
+            message.Payload = Any.Pack(protoPayload);
+        }
 
         if (headers is not null)
         {
             foreach (var kvp in headers)
             {
-                message.Notification.Headers[kvp.Key] = kvp.Value;
+                message.Headers[kvp.Key] = kvp.Value;
             }
         }
 
@@ -223,50 +225,21 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
     public IDisposable OnRequest<TRequest, TResponse>(
         string method,
         Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler)
-        where TRequest : class
-        where TResponse : class
+        where TRequest : Contracts.IMessage, new()
+        where TResponse : Contracts.IMessage
     {
-        var wrapper = new RequestHandler(async (bytes, ctx, ct) =>
-        {
-            var request = serializer.Deserialize<TRequest>(bytes);
-            var response = await handler(request, ctx, ct);
-            return serializer.Serialize(response);
-        });
-
+        var wrapper = new RequestHandler<TRequest, TResponse>(handler);
         _requestHandlers[method] = wrapper;
-
-        return new HandlerRegistration(() => _requestHandlers.TryRemove(method, out _));
-    }
-
-    public IDisposable OnRequest(
-        string method,
-        Func<byte[], RequestContext, CancellationToken, ValueTask<byte[]>> handler)
-    {
-        _requestHandlers[method] = new RequestHandler(handler);
         return new HandlerRegistration(() => _requestHandlers.TryRemove(method, out _));
     }
 
     public IDisposable OnNotification<T>(
         string topic,
         Func<T, NotificationContext, CancellationToken, ValueTask> handler)
-        where T : class
+        where T : Contracts.IMessage, new()
     {
-        var wrapper = new NotificationHandler(async (bytes, ctx, ct) =>
-        {
-            var payload = serializer.Deserialize<T>(bytes);
-            await handler(payload, ctx, ct);
-        });
-
+        var wrapper = new NotificationHandler<T>(handler);
         _notificationHandlers[topic] = wrapper;
-
-        return new HandlerRegistration(() => _notificationHandlers.TryRemove(topic, out _));
-    }
-
-    public IDisposable OnNotification(
-        string topic,
-        Func<byte[], NotificationContext, CancellationToken, ValueTask> handler)
-    {
-        _notificationHandlers[topic] = new NotificationHandler(handler);
         return new HandlerRegistration(() => _notificationHandlers.TryRemove(topic, out _));
     }
 
@@ -274,7 +247,6 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
     {
         SetState(ChannelState.Disconnected);
 
-        // Cancel all pending requests
         foreach (var kvp in _pendingRequests)
         {
             kvp.Value.Completion.TrySetCanceled();
@@ -297,53 +269,56 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
     {
         SetState(ChannelState.Disconnected, reason);
 
-        // Fail all pending requests
         foreach (var kvp in _pendingRequests)
         {
-            kvp.Value.Completion.TrySetException(new DuplexException(StatusCode.Error, reason ?? "Channel disconnected"));
+            kvp.Value.Completion.TrySetException(
+                new DuplexException(StatusCode.Error, ProblemDetails.FromError(StatusCode.Error, reason ?? "Channel disconnected")));
         }
         _pendingRequests.Clear();
     }
 
     private async ValueTask HandleIncomingRequestAsync(DuplexMessage message, CancellationToken cancellationToken)
     {
-        var request = message.Request;
         var stopwatch = Stopwatch.StartNew();
 
-        Response response;
+        DuplexMessage response;
 
-        if (_requestHandlers.TryGetValue(request.Method, out var handler))
+        if (_requestHandlers.TryGetValue(message.Method, out var handler))
         {
             var context = new RequestContext(
-                request.CorrelationId,
-                request.Method,
-                new Dictionary<string, string>(request.Headers),
-                new Dictionary<string, string>(message.Metadata),
+                message.CorrelationId,
+                message.Method,
+                new Dictionary<string, string>(message.Headers),
                 _remoteId);
 
             try
             {
-                var responseBytes = await handler.Handler(request.Payload.ToByteArray(), context, cancellationToken);
+                var responsePayload = await handler.HandleAsync(message.Payload, context, cancellationToken);
                 stopwatch.Stop();
 
-                response = new Response
+                response = new DuplexMessage
                 {
-                    CorrelationId = request.CorrelationId,
-                    Status = Protos.StatusCode.Ok,
-                    Payload = ByteString.CopyFrom(responseBytes),
-                    DurationMs = stopwatch.ElapsedMilliseconds
+                    Id = Guid.NewGuid().ToString("N"),
+                    CorrelationId = message.CorrelationId,
+                    // No method for responses
+                    Status = ProtoStatusCode.Ok,
+                    Payload = responsePayload,
+                    DurationMs = stopwatch.ElapsedMilliseconds,
+                    TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 };
             }
             catch (Exception ex)
             {
                 stopwatch.Stop();
 
-                response = new Response
+                response = new DuplexMessage
                 {
-                    CorrelationId = request.CorrelationId,
-                    Status = Protos.StatusCode.Error,
-                    Error = ex.Message,
-                    DurationMs = stopwatch.ElapsedMilliseconds
+                    Id = Guid.NewGuid().ToString("N"),
+                    CorrelationId = message.CorrelationId,
+                    Status = ProtoStatusCode.Error,
+                    Problem = CreateProtoProblemDetails(ex),
+                    DurationMs = stopwatch.ElapsedMilliseconds,
+                    TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
                 };
             }
         }
@@ -351,48 +326,47 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
         {
             stopwatch.Stop();
 
-            response = new Response
+            response = new DuplexMessage
             {
-                CorrelationId = request.CorrelationId,
-                Status = Protos.StatusCode.NotFound,
-                Error = $"Method '{request.Method}' not found",
-                DurationMs = stopwatch.ElapsedMilliseconds
+                Id = Guid.NewGuid().ToString("N"),
+                CorrelationId = message.CorrelationId,
+                Status = ProtoStatusCode.NotFound,
+                Problem = new ProtoProblemDetails
+                {
+                    Type = "urn:grpc:duplex:not-found",
+                    Title = "Method Not Found",
+                    Status = (int)StatusCode.NotFound,
+                    Detail = $"Method '{message.Method}' was not found",
+                    Code = "METHOD_NOT_FOUND"
+                },
+                DurationMs = stopwatch.ElapsedMilliseconds,
+                TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
         }
 
-        var responseMessage = new DuplexMessage
-        {
-            Id = Guid.NewGuid().ToString("N"),
-            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            Response = response
-        };
-
-        await SendMessageAsync(responseMessage, cancellationToken);
+        await SendMessageAsync(response, cancellationToken);
     }
 
-    private void HandleIncomingResponse(Response response)
+    private void HandleIncomingResponse(DuplexMessage message)
     {
-        if (_pendingRequests.TryRemove(response.CorrelationId, out var pending))
+        if (_pendingRequests.TryRemove(message.CorrelationId, out var pending))
         {
-            pending.Completion.TrySetResult(response);
+            pending.Completion.TrySetResult(message);
         }
     }
 
     private async ValueTask HandleIncomingNotificationAsync(DuplexMessage message, CancellationToken cancellationToken)
     {
-        var notification = message.Notification;
-
-        if (_notificationHandlers.TryGetValue(notification.Topic, out var handler))
+        if (_notificationHandlers.TryGetValue(message.Method, out var handler))
         {
             var context = new NotificationContext(
-                notification.Topic,
-                new Dictionary<string, string>(notification.Headers),
-                new Dictionary<string, string>(message.Metadata),
+                message.Method,
+                new Dictionary<string, string>(message.Headers),
                 _remoteId);
 
             try
             {
-                await handler.Handler(notification.Payload.ToByteArray(), context, cancellationToken);
+                await handler.HandleAsync(message.Payload, context, cancellationToken);
             }
             catch
             {
@@ -438,28 +412,114 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
         }
     }
 
-    private static StatusCode MapStatus(Protos.StatusCode status) => status switch
+    private ProtoProblemDetails CreateProtoProblemDetails(Exception ex)
     {
-        Protos.StatusCode.Ok => StatusCode.Ok,
-        Protos.StatusCode.Error => StatusCode.Error,
-        Protos.StatusCode.NotFound => StatusCode.NotFound,
-        Protos.StatusCode.Timeout => StatusCode.Timeout,
-        Protos.StatusCode.Cancelled => StatusCode.Cancelled,
-        Protos.StatusCode.Unauthorized => StatusCode.Unauthorized,
-        Protos.StatusCode.InvalidRequest => StatusCode.InvalidRequest,
+        var problem = new ProtoProblemDetails
+        {
+            Type = "urn:grpc:duplex:error",
+            Title = "An error occurred",
+            Status = (int)StatusCode.Error,
+            Detail = ex.Message,
+            Code = ex.GetType().Name
+        };
+
+        if (_includeStackTrace && ex.StackTrace is not null)
+        {
+            problem.Trace = ex.StackTrace;
+        }
+
+        if (ex.InnerException is not null)
+        {
+            problem.Errors.Add(new ProtoProblemDetails
+            {
+                Type = "urn:grpc:duplex:error",
+                Title = "Inner exception",
+                Detail = ex.InnerException.Message,
+                Code = ex.InnerException.GetType().Name
+            });
+        }
+
+        return problem;
+    }
+
+    private static StatusCode MapStatus(ProtoStatusCode status) => status switch
+    {
+        ProtoStatusCode.Ok => StatusCode.Ok,
+        ProtoStatusCode.Error => StatusCode.Error,
+        ProtoStatusCode.NotFound => StatusCode.NotFound,
+        ProtoStatusCode.Timeout => StatusCode.Timeout,
+        ProtoStatusCode.Cancelled => StatusCode.Cancelled,
+        ProtoStatusCode.Unauthorized => StatusCode.Unauthorized,
+        ProtoStatusCode.InvalidRequest => StatusCode.InvalidRequest,
+        ProtoStatusCode.Unavailable => StatusCode.Unavailable,
+        ProtoStatusCode.Internal => StatusCode.Internal,
         _ => StatusCode.Unspecified
     };
 
+    private static ProblemDetails MapProblemDetails(ProtoProblemDetails? proto)
+    {
+        if (proto is null)
+        {
+            return new ProblemDetails(Detail: "Unknown error");
+        }
+
+        return new ProblemDetails(
+            Type: proto.Type,
+            Title: proto.Title,
+            Status: proto.Status,
+            Detail: proto.Detail,
+            Instance: proto.Instance,
+            Code: proto.Code,
+            Trace: proto.Trace,
+            Extensions: proto.Extensions.Count > 0 ? new Dictionary<string, string>(proto.Extensions) : null,
+            Errors: proto.Errors.Count > 0 ? proto.Errors.Select(MapProblemDetails).ToList() : null);
+    }
+
+    private interface IRequestHandler
+    {
+        ValueTask<Any?> HandleAsync(Any? payload, RequestContext context, CancellationToken cancellationToken);
+    }
+
+    private interface INotificationHandler
+    {
+        ValueTask HandleAsync(Any? payload, NotificationContext context, CancellationToken cancellationToken);
+    }
+
+    private sealed class RequestHandler<TRequest, TResponse>(
+        Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler) : IRequestHandler
+        where TRequest : Contracts.IMessage, new()
+        where TResponse : Contracts.IMessage
+    {
+        public async ValueTask<Any?> HandleAsync(Any? payload, RequestContext context, CancellationToken cancellationToken)
+        {
+            var request = payload?.Unpack<TRequest>() ?? new TRequest();
+            var response = await handler(request, context, cancellationToken);
+
+            if (response is Google.Protobuf.IMessage protoResponse)
+            {
+                return Any.Pack(protoResponse);
+            }
+
+            return null;
+        }
+    }
+
+    private sealed class NotificationHandler<T>(
+        Func<T, NotificationContext, CancellationToken, ValueTask> handler) : INotificationHandler
+        where T : Contracts.IMessage, new()
+    {
+        public async ValueTask HandleAsync(Any? payload, NotificationContext context, CancellationToken cancellationToken)
+        {
+            var notification = payload?.Unpack<T>() ?? new T();
+            await handler(notification, context, cancellationToken);
+        }
+    }
+
     private sealed record PendingRequest(
         string CorrelationId,
-        TaskCompletionSource<Response> Completion,
-        Stopwatch Stopwatch);
-
-    private sealed record RequestHandler(
-        Func<byte[], RequestContext, CancellationToken, ValueTask<byte[]>> Handler);
-
-    private sealed record NotificationHandler(
-        Func<byte[], NotificationContext, CancellationToken, ValueTask> Handler);
+        TaskCompletionSource<DuplexMessage> Completion,
+        Stopwatch Stopwatch,
+        int? TimeoutMs);
 
     private sealed class HandlerRegistration(Action unregister) : IDisposable
     {
@@ -471,52 +531,6 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer serialize
             {
                 unregister();
             }
-        }
-    }
-}
-
-/// <summary>
-/// Default JSON-based payload serializer. AOT-compatible when used with source generators.
-/// </summary>
-public sealed class JsonPayloadSerializer : IPayloadSerializer
-{
-    /// <summary>
-    /// Default instance with standard options.
-    /// </summary>
-    public static JsonPayloadSerializer Default { get; } = new();
-
-    private readonly JsonSerializerOptions _options;
-
-    /// <summary>
-    /// Creates a new JSON serializer with the specified options.
-    /// </summary>
-    public JsonPayloadSerializer(JsonSerializerOptions? options = null)
-    {
-        _options = options ?? new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            WriteIndented = false
-        };
-    }
-
-    public byte[] Serialize<T>(T value) where T : class =>
-        JsonSerializer.SerializeToUtf8Bytes(value, _options);
-
-    public T Deserialize<T>(byte[] data) where T : class =>
-        JsonSerializer.Deserialize<T>(data, _options)
-            ?? throw new InvalidOperationException($"Failed to deserialize {typeof(T).Name}");
-
-    public bool TryDeserialize<T>(byte[] data, out T? value) where T : class
-    {
-        try
-        {
-            value = JsonSerializer.Deserialize<T>(data, _options);
-            return value is not null;
-        }
-        catch
-        {
-            value = default;
-            return false;
         }
     }
 }

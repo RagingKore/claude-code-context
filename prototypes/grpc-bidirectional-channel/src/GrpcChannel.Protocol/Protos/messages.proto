@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+option csharp_namespace = "GrpcChannel.Protocol.Messages";
+
+package messages;
+
+// Sample request/response messages for demonstration
+
+// Ping/Pong
+message PingRequest {
+}
+
+message PongResponse {
+  string message = 1;
+  int64 timestamp_utc = 2;
+}
+
+// Echo
+message EchoRequest {
+  string message = 1;
+}
+
+message EchoResponse {
+  string message = 1;
+  int64 timestamp_utc = 2;
+}
+
+// Status
+message StatusRequest {
+}
+
+message StatusResponse {
+  int32 active_connections = 1;
+  repeated string client_ids = 2;
+  int64 server_time_utc = 3;
+  int64 uptime_ms = 4;
+}
+
+// Math operations
+message MathRequest {
+  string operation = 1;
+  double a = 2;
+  double b = 3;
+}
+
+message MathResponse {
+  double result = 1;
+  string operation = 2;
+  double a = 3;
+  double b = 4;
+}
+
+// Delay (for testing timeouts)
+message DelayRequest {
+  int32 delay_ms = 1;
+}
+
+message DelayResponse {
+  int32 delayed_ms = 1;
+  int64 completed_at_utc = 2;
+}
+
+// Broadcast
+message BroadcastRequest {
+  string message = 1;
+}
+
+message BroadcastResponse {
+  int32 sent_count = 1;
+}
+
+// Client info (server can request from client)
+message GetClientInfoRequest {
+}
+
+message ClientInfoResponse {
+  string machine_name = 1;
+  string os_version = 2;
+  int32 process_id = 3;
+  int64 timestamp_utc = 4;
+}
+
+// Server ping to client
+message ServerPingRequest {
+  string message = 1;
+}
+
+message ClientPongResponse {
+  string message = 1;
+  int64 timestamp_utc = 2;
+}
+
+// Compute request (server asks client to compute something)
+message ComputeRequest {
+  string expression = 1;
+}
+
+message ComputeResponse {
+  string expression = 1;
+  double result = 2;
+}
+
+// Notifications
+message BroadcastNotification {
+  string message = 1;
+  int64 timestamp_utc = 2;
+}
+
+message ClientEventNotification {
+  string event_type = 1;
+  string data = 2;
+  int64 timestamp_utc = 3;
+}

@@ -1,7 +1,4 @@
-using System.Text;
-using System.Text.Json;
-using GrpcChannel.Protocol;
-using GrpcChannel.Protocol.Contracts;
+using GrpcChannel.Protocol.Messages;
 using GrpcChannel.Server.Services;
 
 var builder = WebApplication.CreateSlimBuilder(args);
@@ -13,9 +10,6 @@ builder.Services.AddGrpc(options =>
     options.MaxReceiveMessageSize = 16 * 1024 * 1024; // 16 MB
     options.MaxSendMessageSize = 16 * 1024 * 1024; // 16 MB
 });
-
-// Register payload serializer
-builder.Services.AddSingleton<IPayloadSerializer>(JsonPayloadSerializer.Default);
 
 // Register connection registry
 builder.Services.AddSingleton<IConnectionRegistry, ConnectionRegistry>();
@@ -42,24 +36,35 @@ registry.OnAllChannels(channel =>
     channel.OnRequest<EchoRequest, EchoResponse>("echo", async (request, ctx, ct) =>
     {
         app.Logger.LogDebug("Echo request from {RemoteId}: {Message}", ctx.RemoteId, request.Message);
-        return new EchoResponse(request.Message, DateTimeOffset.UtcNow);
+        return new EchoResponse
+        {
+            Message = request.Message,
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
     });
 
     // Ping handler
     channel.OnRequest<PingRequest, PongResponse>("ping", async (request, ctx, ct) =>
     {
-        return new PongResponse("pong", DateTimeOffset.UtcNow);
+        return new PongResponse
+        {
+            Message = "pong",
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
     });
 
     // Status handler
     channel.OnRequest<StatusRequest, StatusResponse>("status", async (request, ctx, ct) =>
     {
         var channels = registry.GetAllChannels();
-        return new StatusResponse(
-            channels.Count,
-            channels.Select(c => c.ClientId ?? c.ChannelId).ToArray(),
-            DateTimeOffset.UtcNow,
-            Environment.TickCount64);
+        var response = new StatusResponse
+        {
+            ActiveConnections = channels.Count,
+            ServerTimeUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            UptimeMs = Environment.TickCount64
+        };
+        response.ClientIds.AddRange(channels.Select(c => c.ClientId ?? c.ChannelId));
+        return response;
     });
 
     // Math handler
@@ -74,33 +79,49 @@ registry.OnAllChannels(channel =>
             _ => double.NaN
         };
 
-        return new MathResponse(result, request.Operation, request.A, request.B);
+        return new MathResponse
+        {
+            Result = result,
+            Operation = request.Operation,
+            A = request.A,
+            B = request.B
+        };
     });
 
     // Delay handler (for testing timeouts)
     channel.OnRequest<DelayRequest, DelayResponse>("delay", async (request, ctx, ct) =>
     {
         await Task.Delay(request.DelayMs, ct);
-        return new DelayResponse(request.DelayMs, DateTimeOffset.UtcNow);
+        return new DelayResponse
+        {
+            DelayedMs = request.DelayMs,
+            CompletedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
     });
 
     // Broadcast handler - server can send requests to clients too!
     channel.OnRequest<BroadcastRequest, BroadcastResponse>("broadcast", async (request, ctx, ct) =>
     {
         var sent = 0;
+        var notification = new BroadcastNotification
+        {
+            Message = request.Message,
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
+
         foreach (var info in registry.GetAllChannels())
         {
             if (info.ChannelId != channel.ChannelId) // Don't send to self
             {
-                await info.Channel.SendNotificationAsync("broadcast", request.Message, cancellationToken: ct);
+                await info.Channel.SendNotificationAsync("broadcast", notification, cancellationToken: ct);
                 sent++;
             }
         }
-        return new BroadcastResponse(sent);
+        return new BroadcastResponse { SentCount = sent };
     });
 
     // Subscribe to notifications from clients
-    channel.OnNotification<ClientNotification>("client.event", async (notification, ctx, ct) =>
+    channel.OnNotification<ClientEventNotification>("client.event", async (notification, ctx, ct) =>
     {
         app.Logger.LogInformation("Received notification from {RemoteId}: {EventType} - {Data}",
             ctx.RemoteId, notification.EventType, notification.Data);
@@ -123,24 +144,3 @@ app.Logger.LogInformation("gRPC Duplex Server starting on https://localhost:5001
 app.Logger.LogInformation("Available methods: echo, ping, status, math, delay, broadcast");
 
 await app.RunAsync();
-
-// Request/Response DTOs
-public sealed record EchoRequest(string Message);
-public sealed record EchoResponse(string Message, DateTimeOffset Timestamp);
-
-public sealed record PingRequest();
-public sealed record PongResponse(string Message, DateTimeOffset Timestamp);
-
-public sealed record StatusRequest();
-public sealed record StatusResponse(int ActiveConnections, string[] ClientIds, DateTimeOffset ServerTime, long UptimeMs);
-
-public sealed record MathRequest(string Operation, double A, double B);
-public sealed record MathResponse(double Result, string Operation, double A, double B);
-
-public sealed record DelayRequest(int DelayMs);
-public sealed record DelayResponse(int DelayedMs, DateTimeOffset CompletedAt);
-
-public sealed record BroadcastRequest(string Message);
-public sealed record BroadcastResponse(int SentCount);
-
-public sealed record ClientNotification(string EventType, string Data);

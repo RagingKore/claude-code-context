@@ -1,6 +1,6 @@
 using GrpcChannel.Client;
-using GrpcChannel.Protocol;
 using GrpcChannel.Protocol.Contracts;
+using GrpcChannel.Protocol.Messages;
 using Microsoft.Extensions.Logging;
 
 // Setup logging
@@ -16,10 +16,9 @@ Console.WriteLine("=== gRPC Duplex Channel Client Demo ===\n");
 
 // Create client
 var options = DuplexClientOptions.ForLocalDevelopment();
-var serializer = JsonPayloadSerializer.Default;
 var clientLogger = loggerFactory.CreateLogger<DuplexClient>();
 
-await using var client = new DuplexClient(options, serializer, clientLogger);
+await using var client = new DuplexClient(options, clientLogger);
 
 try
 {
@@ -52,22 +51,28 @@ static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
 {
     Console.WriteLine("--- Registering Client-Side Handlers ---\n");
 
-    // Handler for server-initiated requests
+    // Handler for server-initiated ping requests
     channel.OnRequest<ServerPingRequest, ClientPongResponse>("client.ping", async (request, ctx, ct) =>
     {
         logger.LogInformation("Server pinged client: {Message}", request.Message);
-        return new ClientPongResponse("pong from client", DateTimeOffset.UtcNow);
+        return new ClientPongResponse
+        {
+            Message = "pong from client",
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
     });
 
     // Handler for server requesting client info
     channel.OnRequest<GetClientInfoRequest, ClientInfoResponse>("client.info", async (request, ctx, ct) =>
     {
         logger.LogInformation("Server requested client info");
-        return new ClientInfoResponse(
-            Environment.MachineName,
-            Environment.OSVersion.ToString(),
-            Environment.ProcessId,
-            DateTimeOffset.UtcNow);
+        return new ClientInfoResponse
+        {
+            MachineName = Environment.MachineName,
+            OsVersion = Environment.OSVersion.ToString(),
+            ProcessId = Environment.ProcessId,
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        };
     });
 
     // Handler for server-initiated computation
@@ -83,7 +88,11 @@ static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
             _ => 0.0
         };
 
-        return new ComputeResponse(request.Expression, result);
+        return new ComputeResponse
+        {
+            Expression = request.Expression,
+            Result = result
+        };
     });
 
     // Handler for broadcast notifications from server
@@ -108,14 +117,14 @@ static async Task DemoClientToServerRequests(IDuplexChannel channel, ILogger log
     }
     else
     {
-        Console.WriteLine($"   Failed: {pingResult.Error}");
+        Console.WriteLine($"   Failed: {pingResult.Problem?.Detail}");
     }
 
     // 2. Echo
     Console.WriteLine("\n2. Echo:");
     var echoResult = await channel.SendRequestAsync<EchoRequest, EchoResponse>(
         "echo",
-        new EchoRequest("Hello from bidirectional client!"));
+        new EchoRequest { Message = "Hello from bidirectional client!" });
     if (echoResult.IsSuccess)
     {
         Console.WriteLine($"   Echo: {echoResult.Value!.Message}");
@@ -146,7 +155,7 @@ static async Task DemoClientToServerRequests(IDuplexChannel channel, ILogger log
     {
         var mathResult = await channel.SendRequestAsync<MathRequest, MathResponse>(
             "math",
-            new MathRequest(op, a, b));
+            new MathRequest { Operation = op, A = a, B = b });
 
         if (mathResult.IsSuccess)
         {
@@ -159,7 +168,7 @@ static async Task DemoClientToServerRequests(IDuplexChannel channel, ILogger log
     Console.WriteLine("   Requesting 500ms delay...");
     var delayResult = await channel.SendRequestAsync<DelayRequest, DelayResponse>(
         "delay",
-        new DelayRequest(500));
+        new DelayRequest { DelayMs = 500 });
     if (delayResult.IsSuccess)
     {
         Console.WriteLine($"   Completed in {delayResult.DurationMs}ms");
@@ -170,16 +179,16 @@ static async Task DemoClientToServerRequests(IDuplexChannel channel, ILogger log
     Console.WriteLine("   Requesting 3000ms delay with 1000ms timeout...");
     var timeoutResult = await channel.SendRequestAsync<DelayRequest, DelayResponse>(
         "delay",
-        new DelayRequest(3000),
+        new DelayRequest { DelayMs = 3000 },
         timeoutMs: 1000);
     Console.WriteLine($"   Status: {timeoutResult.Status} (expected: Timeout)");
 
     // 7. Method not found
     Console.WriteLine("\n7. Not Found Test:");
-    var notFoundResult = await channel.SendRequestAsync<object, object>(
+    var notFoundResult = await channel.SendRequestAsync<PingRequest, PongResponse>(
         "nonexistent.method",
-        new { });
-    Console.WriteLine($"   Status: {notFoundResult.Status} - {notFoundResult.Error}");
+        new PingRequest());
+    Console.WriteLine($"   Status: {notFoundResult.Status} - {notFoundResult.Problem?.Detail}");
 }
 
 static async Task DemoNotifications(IDuplexChannel channel, ILogger logger)
@@ -190,36 +199,12 @@ static async Task DemoNotifications(IDuplexChannel channel, ILogger logger)
     Console.WriteLine("Sending notification to server...");
     await channel.SendNotificationAsync(
         "client.event",
-        new ClientEventNotification("startup", "Client demo started"));
+        new ClientEventNotification
+        {
+            EventType = "startup",
+            Data = "Client demo started",
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+        });
 
     Console.WriteLine("Notification sent (fire-and-forget)");
 }
-
-// Request/Response DTOs (matching server)
-public sealed record PingRequest();
-public sealed record PongResponse(string Message, DateTimeOffset Timestamp);
-
-public sealed record EchoRequest(string Message);
-public sealed record EchoResponse(string Message, DateTimeOffset Timestamp);
-
-public sealed record StatusRequest();
-public sealed record StatusResponse(int ActiveConnections, string[] ClientIds, DateTimeOffset ServerTime, long UptimeMs);
-
-public sealed record MathRequest(string Operation, double A, double B);
-public sealed record MathResponse(double Result, string Operation, double A, double B);
-
-public sealed record DelayRequest(int DelayMs);
-public sealed record DelayResponse(int DelayedMs, DateTimeOffset CompletedAt);
-
-// Client-side handler DTOs (server can call these)
-public sealed record ServerPingRequest(string Message);
-public sealed record ClientPongResponse(string Message, DateTimeOffset Timestamp);
-
-public sealed record GetClientInfoRequest();
-public sealed record ClientInfoResponse(string MachineName, string OsVersion, int ProcessId, DateTimeOffset Timestamp);
-
-public sealed record ComputeRequest(string Expression);
-public sealed record ComputeResponse(string Expression, double Result);
-
-public sealed record BroadcastNotification(string Message);
-public sealed record ClientEventNotification(string EventType, string Data);
