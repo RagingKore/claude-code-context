@@ -36,6 +36,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
     public bool IsConnected => _state == ChannelState.Connected;
 
     public event EventHandler<ChannelStateChangedEventArgs>? StateChanged;
+    public event EventHandler<ChannelErrorEventArgs>? Error;
 
     /// <summary>
     /// Attaches the send function for outgoing messages.
@@ -248,16 +249,45 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
     }
 
     /// <summary>
-    /// Marks the channel as disconnected.
+    /// Marks the channel as disconnected and fails all pending requests.
     /// </summary>
     public void Disconnect(string? reason = null)
     {
+        var problem = ProblemDetails.ConnectionLost(reason);
         SetState(ChannelState.Disconnected, reason);
+        FailAllPendingRequests(problem);
+    }
+
+    /// <summary>
+    /// Marks the channel as faulted due to an error.
+    /// </summary>
+    public void Fault(ProblemDetails problem, Exception? exception = null)
+    {
+        SetState(ChannelState.Faulted, problem.Detail);
+        RaiseError(problem, exception, isFatal: true);
+        FailAllPendingRequests(problem);
+    }
+
+    /// <summary>
+    /// Raises an error event without changing channel state.
+    /// </summary>
+    public void RaiseError(ProblemDetails problem, Exception? exception = null, bool isFatal = false)
+    {
+        Error?.Invoke(this, new ChannelErrorEventArgs(problem, exception, isFatal));
+    }
+
+    /// <summary>
+    /// Fails all pending requests with the given problem details.
+    /// </summary>
+    private void FailAllPendingRequests(ProblemDetails problem)
+    {
+        var exception = new DuplexException(
+            (StatusCode)(problem.Status ?? (int)StatusCode.Error),
+            problem);
 
         foreach (var kvp in _pendingRequests)
         {
-            kvp.Value.Completion.TrySetException(
-                new DuplexException(StatusCode.Error, ProblemDetails.FromError(StatusCode.Error, reason ?? "Channel disconnected")));
+            kvp.Value.Completion.TrySetException(exception);
         }
         _pendingRequests.Clear();
     }
@@ -482,7 +512,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
     {
         if (_state != ChannelState.Connected || _sendFunc is null)
         {
-            throw new InvalidOperationException("Channel is not connected");
+            throw new DuplexException(StatusCode.Unavailable, ProblemDetails.NotConnected());
         }
     }
 

@@ -71,6 +71,12 @@ public interface IDuplexChannel : IAsyncDisposable
     /// Event raised when the connection state changes.
     /// </summary>
     event EventHandler<ChannelStateChangedEventArgs>? StateChanged;
+
+    /// <summary>
+    /// Event raised when a channel-level error occurs.
+    /// This includes transport errors, serialization errors, and other non-request-specific failures.
+    /// </summary>
+    event EventHandler<ChannelErrorEventArgs>? Error;
 }
 
 /// <summary>
@@ -191,6 +197,61 @@ public sealed record ProblemDetails(
             Status: (int)StatusCode.Cancelled,
             Detail: "The request was cancelled",
             Code: "CANCELLED");
+
+    /// <summary>
+    /// Creates a problem details for connection loss.
+    /// </summary>
+    public static ProblemDetails ConnectionLost(string? reason = null) =>
+        new(
+            Type: "urn:grpc:duplex:connection-lost",
+            Title: "Connection Lost",
+            Status: (int)StatusCode.Unavailable,
+            Detail: reason ?? "The connection to the remote endpoint was lost",
+            Code: "CONNECTION_LOST");
+
+    /// <summary>
+    /// Creates a problem details for transport/gRPC errors.
+    /// </summary>
+    public static ProblemDetails TransportError(string grpcStatus, string? detail = null) =>
+        new(
+            Type: "urn:grpc:duplex:transport-error",
+            Title: "Transport Error",
+            Status: (int)StatusCode.Unavailable,
+            Detail: detail ?? $"Transport error: {grpcStatus}",
+            Code: $"GRPC_{grpcStatus.ToUpperInvariant()}");
+
+    /// <summary>
+    /// Creates a problem details for serialization errors.
+    /// </summary>
+    public static ProblemDetails SerializationError(string message, bool isSerialize = true) =>
+        new(
+            Type: "urn:grpc:duplex:serialization-error",
+            Title: isSerialize ? "Serialization Error" : "Deserialization Error",
+            Status: (int)StatusCode.InvalidRequest,
+            Detail: message,
+            Code: isSerialize ? "SERIALIZATION_FAILED" : "DESERIALIZATION_FAILED");
+
+    /// <summary>
+    /// Creates a problem details for invalid/malformed messages.
+    /// </summary>
+    public static ProblemDetails InvalidMessage(string reason) =>
+        new(
+            Type: "urn:grpc:duplex:invalid-message",
+            Title: "Invalid Message",
+            Status: (int)StatusCode.InvalidRequest,
+            Detail: reason,
+            Code: "INVALID_MESSAGE");
+
+    /// <summary>
+    /// Creates a problem details for channel not connected errors.
+    /// </summary>
+    public static ProblemDetails NotConnected() =>
+        new(
+            Type: "urn:grpc:duplex:not-connected",
+            Title: "Not Connected",
+            Status: (int)StatusCode.Unavailable,
+            Detail: "The channel is not connected",
+            Code: "NOT_CONNECTED");
 }
 
 /// <summary>
@@ -267,6 +328,17 @@ public sealed record ChannelStateChangedEventArgs(
     ChannelState PreviousState,
     ChannelState CurrentState,
     string? Reason = null);
+
+/// <summary>
+/// Event arguments for channel errors.
+/// </summary>
+/// <param name="Problem">The problem details describing the error.</param>
+/// <param name="Exception">The original exception, if any.</param>
+/// <param name="IsFatal">Whether this error is fatal and the channel should be closed.</param>
+public sealed record ChannelErrorEventArgs(
+    ProblemDetails Problem,
+    Exception? Exception = null,
+    bool IsFatal = false);
 
 /// <summary>
 /// Channel connection state.

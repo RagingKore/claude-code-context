@@ -64,24 +64,69 @@ public sealed class DuplexServiceImpl(
             {
                 await channel.ProcessIncomingAsync(message, context.CancellationToken);
             }
+
+            // Stream ended normally
+            logger.LogInformation("Client {ClientId} closed the connection", clientId);
+            channel.Disconnect("Client closed the connection");
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled)
+        {
+            logger.LogInformation("Channel {ChannelId} was cancelled", channelId);
+            channel.Disconnect("Connection cancelled");
+        }
+        catch (RpcException ex)
+        {
+            // Convert gRPC exception to ProblemDetails
+            var problem = MapGrpcException(ex);
+            logger.LogError(ex, "gRPC error on channel {ChannelId}: {Status}", channelId, ex.StatusCode);
+            channel.Fault(problem, ex);
         }
         catch (OperationCanceledException)
         {
             logger.LogInformation("Channel {ChannelId} was cancelled", channelId);
+            channel.Disconnect("Operation cancelled");
         }
         catch (Exception ex)
         {
+            // Convert general exception to ProblemDetails
+            var problem = ProblemDetails.FromException(ex, hostEnvironment.IsDevelopment());
             logger.LogError(ex, "Error processing channel {ChannelId}", channelId);
+            channel.Fault(problem, ex);
         }
         finally
         {
             connectionRegistry.Unregister(channelId);
-            channel.Disconnect("Client disconnected");
             await channel.DisposeAsync();
             writeLock.Dispose();
 
             logger.LogInformation("Client {ClientId} disconnected from channel {ChannelId}", clientId, channelId);
         }
+    }
+
+    /// <summary>
+    /// Maps a gRPC exception to ProblemDetails.
+    /// </summary>
+    private static ProblemDetails MapGrpcException(RpcException ex)
+    {
+        var grpcStatus = ex.StatusCode.ToString();
+        var detail = !string.IsNullOrEmpty(ex.Status.Detail)
+            ? ex.Status.Detail
+            : ex.Message;
+
+        return ex.StatusCode switch
+        {
+            StatusCode.Unavailable => ProblemDetails.TransportError(grpcStatus, $"Service unavailable: {detail}"),
+            StatusCode.DeadlineExceeded => ProblemDetails.Timeout(0) with { Detail = detail },
+            StatusCode.Cancelled => ProblemDetails.Cancelled(),
+            StatusCode.InvalidArgument => ProblemDetails.InvalidMessage(detail),
+            StatusCode.Internal => new ProblemDetails(
+                Type: "urn:grpc:duplex:internal",
+                Title: "Internal Error",
+                Status: (int)Contracts.StatusCode.Internal,
+                Detail: detail,
+                Code: "GRPC_INTERNAL"),
+            _ => ProblemDetails.TransportError(grpcStatus, detail)
+        };
     }
 }
 

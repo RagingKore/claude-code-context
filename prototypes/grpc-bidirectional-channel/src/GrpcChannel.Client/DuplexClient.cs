@@ -174,20 +174,74 @@ public sealed class DuplexClient(
             {
                 await _duplexChannel!.ProcessIncomingAsync(message, cancellationToken);
             }
+
+            // Stream ended normally
+            logger?.LogInformation("Server closed the connection");
+            _duplexChannel?.Disconnect("Server closed the connection");
         }
         catch (RpcException ex) when (ex.StatusCode == StatusCode.Cancelled)
         {
             logger?.LogInformation("Connection was cancelled");
+            _duplexChannel?.Disconnect("Connection cancelled");
+        }
+        catch (RpcException ex)
+        {
+            // Convert gRPC exception to ProblemDetails
+            var problem = MapGrpcException(ex);
+            logger?.LogError(ex, "gRPC error: {Status} - {Detail}", ex.StatusCode, ex.Status.Detail);
+            _duplexChannel?.Fault(problem, ex);
         }
         catch (OperationCanceledException)
         {
             logger?.LogInformation("Receive loop was cancelled");
+            _duplexChannel?.Disconnect("Operation cancelled");
         }
         catch (Exception ex)
         {
+            // Convert general exception to ProblemDetails
+            var problem = ProblemDetails.FromException(ex, options.IncludeStackTrace);
             logger?.LogError(ex, "Error receiving messages");
-            _duplexChannel?.Disconnect(ex.Message);
+            _duplexChannel?.Fault(problem, ex);
         }
+    }
+
+    /// <summary>
+    /// Maps a gRPC exception to ProblemDetails.
+    /// </summary>
+    private static ProblemDetails MapGrpcException(RpcException ex)
+    {
+        var grpcStatus = ex.StatusCode.ToString();
+        var detail = !string.IsNullOrEmpty(ex.Status.Detail)
+            ? ex.Status.Detail
+            : ex.Message;
+
+        return ex.StatusCode switch
+        {
+            StatusCode.Unavailable => ProblemDetails.TransportError(grpcStatus, $"Service unavailable: {detail}"),
+            StatusCode.DeadlineExceeded => ProblemDetails.Timeout(0) with { Detail = detail },
+            StatusCode.Cancelled => ProblemDetails.Cancelled(),
+            StatusCode.Unauthenticated => new ProblemDetails(
+                Type: "urn:grpc:duplex:unauthenticated",
+                Title: "Unauthenticated",
+                Status: (int)Contracts.StatusCode.Unauthorized,
+                Detail: detail,
+                Code: "GRPC_UNAUTHENTICATED"),
+            StatusCode.PermissionDenied => new ProblemDetails(
+                Type: "urn:grpc:duplex:permission-denied",
+                Title: "Permission Denied",
+                Status: (int)Contracts.StatusCode.Unauthorized,
+                Detail: detail,
+                Code: "GRPC_PERMISSION_DENIED"),
+            StatusCode.NotFound => ProblemDetails.NotFound(detail),
+            StatusCode.InvalidArgument => ProblemDetails.InvalidMessage(detail),
+            StatusCode.Internal => new ProblemDetails(
+                Type: "urn:grpc:duplex:internal",
+                Title: "Internal Error",
+                Status: (int)Contracts.StatusCode.Internal,
+                Detail: detail,
+                Code: "GRPC_INTERNAL"),
+            _ => ProblemDetails.TransportError(grpcStatus, detail)
+        };
     }
 }
 
