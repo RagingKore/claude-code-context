@@ -1,4 +1,5 @@
 using GrpcChannel.Client;
+using GrpcChannel.Protocol.Contracts;
 using GrpcChannel.Protocol.Messages;
 using Microsoft.Extensions.Logging;
 
@@ -17,7 +18,16 @@ Console.WriteLine("=== gRPC Protocol Client Demo ===\n");
 var options = ProtocolClientOptions.ForLocalDevelopment();
 var clientLogger = loggerFactory.CreateLogger<ProtocolClient>();
 
-await using var client = new ProtocolClient(options, logger: clientLogger);
+// Fluent callback configuration
+await using var client = new ProtocolClient(options, logger: clientLogger)
+    .OnStateChanged((prev, current, reason) =>
+    {
+        Console.WriteLine($"[State] {prev} -> {current}" + (reason != null ? $" ({reason})" : ""));
+    })
+    .OnError((problem, ex, isFatal) =>
+    {
+        Console.WriteLine($"[Error] {problem.Title}: {problem.Detail}" + (isFatal ? " (FATAL)" : ""));
+    });
 
 try
 {

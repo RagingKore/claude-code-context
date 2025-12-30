@@ -7,7 +7,8 @@ A modern .NET 10 implementation of a full-duplex gRPC protocol where **both clie
 - **Full Duplex RPC**: Both sides can initiate requests and register handlers
 - **Correlation-Based Responses**: Requests are matched to responses via GUID correlation IDs
 - **Non-Blocking**: Async handlers with proper cancellation support
-- **Handler Registration**: Fluent API for registering typed request handlers
+- **Fluent API**: Chainable configuration for handlers and callbacks
+- **Fluent Callbacks**: `OnStateChanged()` and `OnError()` with sync/async support
 - **Fire-and-Forget Notifications**: Support for one-way messages
 - **High-Throughput Data Streams**: Separate server-side streaming for volume data
 - **Dual Payload Support**: Use protobuf messages OR C# records (JSON serialized)
@@ -184,11 +185,31 @@ dataStreamRegistry.Register("batch", async (context, writer, ct) =>
 });
 ```
 
-### Client: Subscribing to Data Streams
+### Client: Fluent Configuration and Data Streams
 
 ```csharp
-// Use ProtocolClient for RPC, notifications, and data streams
-await using var client = new ProtocolClient(options);
+// Create ProtocolClient with fluent callback configuration
+await using var client = new ProtocolClient(options)
+    .OnStateChanged((prev, current, reason) =>
+    {
+        Console.WriteLine($"[State] {prev} -> {current}" + (reason != null ? $" ({reason})" : ""));
+    })
+    .OnError((problem, ex, isFatal) =>
+    {
+        Console.WriteLine($"[Error] {problem.Title}: {problem.Detail}" + (isFatal ? " (FATAL)" : ""));
+    });
+
+// Async callbacks are also supported
+await using var client2 = new ProtocolClient(options)
+    .OnStateChanged(async (prev, current, reason) =>
+    {
+        await LogStateChangeAsync(prev, current, reason);
+    })
+    .OnError(async (problem, ex, isFatal) =>
+    {
+        await NotifyMonitoringServiceAsync(problem);
+    });
+
 await client.ConnectAsync();
 
 // RPC request

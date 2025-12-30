@@ -30,6 +30,10 @@ public sealed class ProtocolClient(
     private Task? _receiveTask;
     private SemaphoreSlim? _writeLock;
 
+    // Callback delegates
+    private Func<ChannelState, ChannelState, string?, ValueTask>? _stateChangedCallback;
+    private Func<ProblemDetails, Exception?, bool, ValueTask>? _errorCallback;
+
     /// <summary>
     /// Indicates whether the client is connected to the server.
     /// </summary>
@@ -41,14 +45,56 @@ public sealed class ProtocolClient(
     public ProtocolClientOptions Options => options;
 
     /// <summary>
-    /// Event raised when the connection state changes.
+    /// Registers a callback for connection state changes.
     /// </summary>
-    public event EventHandler<ChannelStateChangedEventArgs>? StateChanged;
+    /// <param name="callback">Callback invoked when state changes (previousState, currentState, reason).</param>
+    /// <returns>This client instance for fluent chaining.</returns>
+    public ProtocolClient OnStateChanged(Func<ChannelState, ChannelState, string?, ValueTask> callback)
+    {
+        _stateChangedCallback = callback;
+        return this;
+    }
 
     /// <summary>
-    /// Event raised when a channel-level error occurs.
+    /// Registers a callback for connection state changes (synchronous version).
     /// </summary>
-    public event EventHandler<ChannelErrorEventArgs>? Error;
+    /// <param name="callback">Callback invoked when state changes (previousState, currentState, reason).</param>
+    /// <returns>This client instance for fluent chaining.</returns>
+    public ProtocolClient OnStateChanged(Action<ChannelState, ChannelState, string?> callback)
+    {
+        _stateChangedCallback = (prev, current, reason) =>
+        {
+            callback(prev, current, reason);
+            return ValueTask.CompletedTask;
+        };
+        return this;
+    }
+
+    /// <summary>
+    /// Registers a callback for channel-level errors.
+    /// </summary>
+    /// <param name="callback">Callback invoked on error (problem, exception, isFatal).</param>
+    /// <returns>This client instance for fluent chaining.</returns>
+    public ProtocolClient OnError(Func<ProblemDetails, Exception?, bool, ValueTask> callback)
+    {
+        _errorCallback = callback;
+        return this;
+    }
+
+    /// <summary>
+    /// Registers a callback for channel-level errors (synchronous version).
+    /// </summary>
+    /// <param name="callback">Callback invoked on error (problem, exception, isFatal).</param>
+    /// <returns>This client instance for fluent chaining.</returns>
+    public ProtocolClient OnError(Action<ProblemDetails, Exception?, bool> callback)
+    {
+        _errorCallback = (problem, ex, isFatal) =>
+        {
+            callback(problem, ex, isFatal);
+            return ValueTask.CompletedTask;
+        };
+        return this;
+    }
 
     /// <summary>
     /// Gets the channel, throwing if not connected.
@@ -115,9 +161,36 @@ public sealed class ProtocolClient(
         var channelId = Guid.NewGuid().ToString("N");
         _duplexChannel = new DuplexChannel(channelId, _serializer);
 
-        // Forward events from the channel
-        _duplexChannel.StateChanged += (s, e) => StateChanged?.Invoke(this, e);
-        _duplexChannel.Error += (s, e) => Error?.Invoke(this, e);
+        // Wire up callbacks from the channel
+        _duplexChannel.StateChanged += async (s, e) =>
+        {
+            if (_stateChangedCallback is not null)
+            {
+                try
+                {
+                    await _stateChangedCallback(e.PreviousState, e.CurrentState, e.Reason);
+                }
+                catch (Exception ex)
+                {
+                    logger?.LogWarning(ex, "Error in state changed callback");
+                }
+            }
+        };
+
+        _duplexChannel.Error += async (s, e) =>
+        {
+            if (_errorCallback is not null)
+            {
+                try
+                {
+                    await _errorCallback(e.Problem, e.Exception, e.IsFatal);
+                }
+                catch (Exception ex)
+                {
+                    logger?.LogWarning(ex, "Error in error callback");
+                }
+            }
+        };
 
         // Attach the sender
         _duplexChannel.AttachSender(
