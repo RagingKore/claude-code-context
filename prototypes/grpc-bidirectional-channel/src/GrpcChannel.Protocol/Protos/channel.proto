@@ -9,8 +9,13 @@ package channel;
 // Bidirectional duplex service supporting full-duplex RPC
 // Both client and server can send requests and receive correlated responses
 service DuplexService {
-  // Single bidirectional stream for all communication
+  // Control channel: bidirectional stream for RPC and notifications
   rpc Open(stream ProtocolDataUnit) returns (stream ProtocolDataUnit);
+
+  // Data channel: high-throughput server-side streaming
+  // Client subscribes with a request, server streams data back
+  // Use this for high-volume data that would otherwise flood the control channel
+  rpc Subscribe(DataStreamRequest) returns (stream DataStreamMessage);
 }
 
 // Protocol Data Unit (PDU) - unified message envelope for bidirectional communication
@@ -117,4 +122,61 @@ enum StatusCode {
   STATUS_CODE_INVALID_REQUEST = 7;
   STATUS_CODE_UNAVAILABLE = 8;
   STATUS_CODE_INTERNAL = 9;
+}
+
+// ============================================================================
+// HIGH-THROUGHPUT DATA STREAMING
+// ============================================================================
+
+// Request to subscribe to a data stream
+// Client sends this once, server streams messages back
+message DataStreamRequest {
+  // Unique identifier for this stream subscription
+  string stream_id = 1;
+
+  // Topic/channel to subscribe to (e.g., "market-data", "events", "logs")
+  string topic = 2;
+
+  // Optional filter expression (topic-specific)
+  string filter = 3;
+
+  // Starting position (topic-specific, e.g., sequence number, timestamp)
+  string cursor = 4;
+
+  // Maximum messages per second (0 = unlimited)
+  int32 max_rate = 5;
+
+  // Buffer size hint for the server
+  int32 buffer_size = 6;
+
+  // Additional subscription options
+  map<string, string> options = 7;
+}
+
+// High-throughput data stream message
+// Optimized for volume - minimal overhead per message
+message DataStreamMessage {
+  // Stream identifier (matches the subscription)
+  string stream_id = 1;
+
+  // Monotonically increasing sequence number within the stream
+  int64 sequence = 2;
+
+  // Message payload
+  google.protobuf.Any payload = 3;
+
+  // Message timestamp (UTC milliseconds since epoch)
+  int64 timestamp_utc = 4;
+
+  // Partition/shard key (for ordered delivery within partition)
+  string partition_key = 5;
+
+  // Message type hint (for client-side routing)
+  string message_type = 6;
+
+  // True if this is the final message in the stream
+  bool is_complete = 7;
+
+  // Error if the stream encountered a problem
+  ProblemDetails error = 8;
 }

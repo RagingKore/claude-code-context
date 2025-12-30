@@ -14,6 +14,9 @@ builder.Services.AddGrpc(options =>
 // Register connection registry
 builder.Services.AddSingleton<IConnectionRegistry, ConnectionRegistry>();
 
+// Register data stream registry
+builder.Services.AddSingleton<IDataStreamRegistry, DataStreamRegistry>();
+
 // Configure Kestrel for HTTP/2
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -195,6 +198,80 @@ registry.OnAllChannels(channel =>
     });
 });
 
+// =============================================
+// DATA STREAM HANDLERS (high-throughput server-streaming)
+// =============================================
+
+var dataStreamRegistry = app.Services.GetRequiredService<IDataStreamRegistry>();
+
+// Counter stream - sends incrementing numbers at high rate
+dataStreamRegistry.Register("counter", async (context, writer, ct) =>
+{
+    app.Logger.LogInformation("Starting counter stream {StreamId}", context.StreamId);
+
+    var count = 0L;
+    var maxRate = context.MaxRate > 0 ? context.MaxRate : 1000;
+    var delay = TimeSpan.FromMilliseconds(1000.0 / maxRate);
+
+    while (!ct.IsCancellationRequested)
+    {
+        await writer.WriteAsync(new CounterEvent(++count, DateTimeOffset.UtcNow));
+
+        if (delay.TotalMilliseconds > 0)
+        {
+            await Task.Delay(delay, ct);
+        }
+    }
+});
+
+// Events stream - simulated event stream
+dataStreamRegistry.Register("events", async (context, writer, ct) =>
+{
+    app.Logger.LogInformation("Starting events stream {StreamId} with filter: {Filter}",
+        context.StreamId, context.Filter);
+
+    var eventTypes = new[] { "user.login", "user.logout", "order.created", "order.completed", "system.alert" };
+    var sequence = 0L;
+
+    while (!ct.IsCancellationRequested)
+    {
+        var eventType = eventTypes[Random.Shared.Next(eventTypes.Length)];
+
+        // Apply filter if specified
+        if (!string.IsNullOrEmpty(context.Filter) && !eventType.StartsWith(context.Filter))
+        {
+            await Task.Delay(10, ct);
+            continue;
+        }
+
+        await writer.WriteAsync(
+            new StreamEvent(++sequence, eventType, $"Event data for {eventType}", DateTimeOffset.UtcNow),
+            partitionKey: eventType.Split('.')[0],
+            messageType: eventType);
+
+        await Task.Delay(Random.Shared.Next(10, 100), ct);
+    }
+});
+
+// Batch stream - sends data in batches then completes
+dataStreamRegistry.Register("batch", async (context, writer, ct) =>
+{
+    var batchSize = 100;
+    if (context.Options.TryGetValue("batch_size", out var sizeStr) && int.TryParse(sizeStr, out var size))
+    {
+        batchSize = size;
+    }
+
+    app.Logger.LogInformation("Starting batch stream {StreamId} with size: {Size}", context.StreamId, batchSize);
+
+    for (var i = 1; i <= batchSize && !ct.IsCancellationRequested; i++)
+    {
+        await writer.WriteAsync(new BatchItem(i, $"Item {i}", i * 1.5));
+    }
+
+    // Stream will auto-complete when handler returns
+});
+
 // Map gRPC services
 app.MapGrpcService<DuplexServiceImpl>();
 
@@ -210,6 +287,7 @@ app.MapGet("/", () => Results.Ok(new
 app.Logger.LogInformation("gRPC Duplex Server starting on https://localhost:5001");
 app.Logger.LogInformation("Protobuf methods: echo, ping, status, math, delay, broadcast");
 app.Logger.LogInformation("C# record methods: greet, process, user.get");
+app.Logger.LogInformation("Data streams: counter, events, batch");
 
 await app.RunAsync();
 
@@ -238,3 +316,16 @@ public sealed record UserInfo(
 
 // Custom event notification
 public sealed record CustomEventRecord(string EventType, object? Payload, DateTimeOffset Timestamp);
+
+// =============================================
+// DATA STREAM EVENT TYPES
+// =============================================
+
+// Counter stream event
+public sealed record CounterEvent(long Count, DateTimeOffset Timestamp);
+
+// Generic stream event
+public sealed record StreamEvent(long Sequence, string EventType, string Data, DateTimeOffset Timestamp);
+
+// Batch item
+public sealed record BatchItem(int Id, string Name, double Value);

@@ -39,6 +39,9 @@ try
     // Demo: Notifications
     await DemoNotifications(client.Channel, logger);
 
+    // Demo: High-throughput data streams
+    await DemoDataStreams(options, loggerFactory, logger);
+
     // Keep running to receive server requests
     Console.WriteLine("\n--- Listening for server requests (press Enter to exit) ---");
     Console.ReadLine();
@@ -273,6 +276,83 @@ static async Task DemoNotifications(IDuplexChannel channel, ILogger logger)
     Console.WriteLine("JSON notification sent");
 }
 
+static async Task DemoDataStreams(DuplexClientOptions options, ILoggerFactory loggerFactory, ILogger logger)
+{
+    Console.WriteLine("\n=== HIGH-THROUGHPUT DATA STREAMS ===\n");
+
+    // Create a separate data stream client
+    var streamLogger = loggerFactory.CreateLogger<DataStreamClient>();
+    await using var streamClient = new DataStreamClient(options, logger: streamLogger);
+
+    // 1. Batch stream - finite stream that completes
+    Console.WriteLine("1. Batch Stream (finite, 10 items):");
+    var batchOptions = new Dictionary<string, string> { ["batch_size"] = "10" };
+    var batchCount = 0;
+
+    await foreach (var item in streamClient.SubscribeAsync<BatchItem>(
+        "batch",
+        options: batchOptions))
+    {
+        batchCount++;
+        Console.WriteLine($"   [{item.Sequence}] {item.Payload?.Name} = {item.Payload?.Value}");
+    }
+    Console.WriteLine($"   Batch complete: {batchCount} items received\n");
+
+    // 2. Counter stream - sample a few messages then cancel
+    Console.WriteLine("2. Counter Stream (sampling 5 messages at 10/sec):");
+    using var counterCts = new CancellationTokenSource();
+    var counterCount = 0;
+
+    try
+    {
+        await foreach (var item in streamClient.SubscribeAsync<CounterEvent>(
+            "counter",
+            maxRate: 10,
+            cancellationToken: counterCts.Token))
+        {
+            counterCount++;
+            Console.WriteLine($"   [{item.Sequence}] Count: {item.Payload?.Count} at {item.Payload?.Timestamp:HH:mm:ss.fff}");
+
+            if (counterCount >= 5)
+            {
+                counterCts.Cancel();
+            }
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine($"   Stream cancelled after {counterCount} messages\n");
+    }
+
+    // 3. Events stream with filter
+    Console.WriteLine("3. Events Stream (filtered to 'user.*', sampling 5 messages):");
+    using var eventsCts = new CancellationTokenSource();
+    var eventsCount = 0;
+
+    try
+    {
+        await foreach (var item in streamClient.SubscribeAsync<StreamEvent>(
+            "events",
+            filter: "user",
+            cancellationToken: eventsCts.Token))
+        {
+            eventsCount++;
+            Console.WriteLine($"   [{item.Sequence}] {item.Payload?.EventType}: {item.Payload?.Data}");
+
+            if (eventsCount >= 5)
+            {
+                eventsCts.Cancel();
+            }
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine($"   Stream cancelled after {eventsCount} messages\n");
+    }
+
+    Console.WriteLine("Data stream demos complete!");
+}
+
 // =============================================
 // C# RECORD TYPES (serialized with JSON via RawPayload)
 // These must match the server-side definitions
@@ -310,3 +390,16 @@ public sealed record ClientHealthCheckResponse(
 
 // Server notification to client (JSON)
 public sealed record ServerNotificationRecord(string Type, string Message, DateTimeOffset Timestamp);
+
+// =============================================
+// DATA STREAM EVENT TYPES (must match server)
+// =============================================
+
+// Counter stream event
+public sealed record CounterEvent(long Count, DateTimeOffset Timestamp);
+
+// Generic stream event
+public sealed record StreamEvent(long Sequence, string EventType, string Data, DateTimeOffset Timestamp);
+
+// Batch item
+public sealed record BatchItem(int Id, string Name, double Value);

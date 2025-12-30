@@ -13,11 +13,13 @@ namespace GrpcChannel.Server.Services;
 /// </summary>
 /// <param name="logger">Logger instance.</param>
 /// <param name="connectionRegistry">Connection registry for tracking active channels.</param>
+/// <param name="dataStreamRegistry">Registry for data stream handlers.</param>
 /// <param name="hostEnvironment">Host environment for determining debug mode.</param>
 /// <param name="serializer">Optional payload serializer for non-protobuf types. Defaults to JSON.</param>
 public sealed class DuplexServiceImpl(
     ILogger<DuplexServiceImpl> logger,
     IConnectionRegistry connectionRegistry,
+    IDataStreamRegistry dataStreamRegistry,
     IHostEnvironment hostEnvironment,
     IPayloadSerializer? serializer = null) : DuplexService.DuplexServiceBase
 {
@@ -100,6 +102,115 @@ public sealed class DuplexServiceImpl(
             writeLock.Dispose();
 
             logger.LogInformation("Client {ClientId} disconnected from channel {ChannelId}", clientId, channelId);
+        }
+    }
+
+    /// <summary>
+    /// Subscribes to a high-throughput data stream.
+    /// Server streams data to the client based on the subscription request.
+    /// </summary>
+    public override async Task Subscribe(
+        DataStreamRequest request,
+        IServerStreamWriter<DataStreamMessage> responseStream,
+        ServerCallContext context)
+    {
+        var clientId = context.RequestHeaders.GetValue("x-client-id") ?? "unknown";
+        var streamId = request.StreamId;
+
+        if (string.IsNullOrEmpty(streamId))
+        {
+            streamId = Guid.NewGuid().ToString("N");
+        }
+
+        logger.LogInformation(
+            "Client {ClientId} subscribing to stream {StreamId} on topic {Topic}",
+            clientId, streamId, request.Topic);
+
+        // Get the handler for this topic
+        var handler = dataStreamRegistry.GetHandler(request.Topic);
+
+        if (handler is null)
+        {
+            // Send error message and complete
+            await responseStream.WriteAsync(new DataStreamMessage
+            {
+                StreamId = streamId,
+                Sequence = 0,
+                TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                IsComplete = true,
+                Error = new Protos.ProblemDetails
+                {
+                    Type = "urn:grpc:duplex:topic-not-found",
+                    Title = "Topic Not Found",
+                    Status = (int)Contracts.StatusCode.NotFound,
+                    Detail = $"No handler registered for topic '{request.Topic}'",
+                    Code = "TOPIC_NOT_FOUND"
+                }
+            }, context.CancellationToken);
+            return;
+        }
+
+        try
+        {
+            // Create stream context
+            var streamContext = new DataStreamContext(
+                StreamId: streamId,
+                Topic: request.Topic,
+                ClientId: clientId,
+                Filter: request.Filter,
+                Cursor: request.Cursor,
+                MaxRate: request.MaxRate,
+                BufferSize: request.BufferSize,
+                Options: new Dictionary<string, string>(request.Options),
+                CancellationToken: context.CancellationToken);
+
+            // Create writer wrapper
+            var writer = new DataStreamWriter(responseStream, streamId, serializer);
+
+            // Invoke the handler
+            await handler(streamContext, writer, context.CancellationToken);
+
+            // Send completion message if not already sent
+            if (!writer.IsCompleted)
+            {
+                await writer.CompleteAsync();
+            }
+
+            logger.LogInformation(
+                "Stream {StreamId} completed. Sent {Count} messages",
+                streamId, writer.MessageCount);
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogInformation("Stream {StreamId} was cancelled", streamId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error in stream {StreamId}", streamId);
+
+            // Try to send error message
+            try
+            {
+                await responseStream.WriteAsync(new DataStreamMessage
+                {
+                    StreamId = streamId,
+                    TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    IsComplete = true,
+                    Error = new Protos.ProblemDetails
+                    {
+                        Type = "urn:grpc:duplex:stream-error",
+                        Title = "Stream Error",
+                        Status = (int)Contracts.StatusCode.Error,
+                        Detail = ex.Message,
+                        Code = ex.GetType().Name,
+                        Trace = hostEnvironment.IsDevelopment() ? ex.StackTrace : null
+                    }
+                }, context.CancellationToken);
+            }
+            catch
+            {
+                // Stream may already be closed
+            }
         }
     }
 
@@ -279,5 +390,160 @@ public sealed class ConnectionRegistry(ILogger<ConnectionRegistry> logger) : ICo
                 unregister();
             }
         }
+    }
+}
+
+/// <summary>
+/// Registry for data stream handlers.
+/// </summary>
+public interface IDataStreamRegistry
+{
+    /// <summary>
+    /// Registers a handler for a topic.
+    /// </summary>
+    void Register(string topic, DataStreamHandler handler);
+
+    /// <summary>
+    /// Gets the handler for a topic.
+    /// </summary>
+    DataStreamHandler? GetHandler(string topic);
+}
+
+/// <summary>
+/// Handler for data streams.
+/// </summary>
+public delegate Task DataStreamHandler(
+    DataStreamContext context,
+    IDataStreamWriter writer,
+    CancellationToken cancellationToken);
+
+/// <summary>
+/// Context for a data stream subscription.
+/// </summary>
+public sealed record DataStreamContext(
+    string StreamId,
+    string Topic,
+    string ClientId,
+    string? Filter,
+    string? Cursor,
+    int MaxRate,
+    int BufferSize,
+    IReadOnlyDictionary<string, string> Options,
+    CancellationToken CancellationToken);
+
+/// <summary>
+/// Writer for sending data stream messages.
+/// </summary>
+public interface IDataStreamWriter
+{
+    /// <summary>
+    /// Number of messages sent.
+    /// </summary>
+    long MessageCount { get; }
+
+    /// <summary>
+    /// Whether the stream has been completed.
+    /// </summary>
+    bool IsCompleted { get; }
+
+    /// <summary>
+    /// Writes a message to the stream.
+    /// </summary>
+    ValueTask WriteAsync<T>(T payload, string? partitionKey = null, string? messageType = null);
+
+    /// <summary>
+    /// Completes the stream.
+    /// </summary>
+    ValueTask CompleteAsync();
+}
+
+/// <summary>
+/// Default implementation of data stream writer.
+/// </summary>
+internal sealed class DataStreamWriter(
+    IServerStreamWriter<DataStreamMessage> stream,
+    string streamId,
+    IPayloadSerializer? serializer) : IDataStreamWriter
+{
+    private readonly IPayloadSerializer _serializer = serializer ?? JsonPayloadSerializer.Default;
+    private long _sequence;
+    private bool _isCompleted;
+
+    public long MessageCount => _sequence;
+    public bool IsCompleted => _isCompleted;
+
+    public async ValueTask WriteAsync<T>(T payload, string? partitionKey = null, string? messageType = null)
+    {
+        if (_isCompleted)
+        {
+            throw new InvalidOperationException("Stream has already been completed");
+        }
+
+        var message = new DataStreamMessage
+        {
+            StreamId = streamId,
+            Sequence = Interlocked.Increment(ref _sequence),
+            Payload = PackPayload(payload),
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            PartitionKey = partitionKey ?? string.Empty,
+            MessageType = messageType ?? typeof(T).Name
+        };
+
+        await stream.WriteAsync(message);
+    }
+
+    public async ValueTask CompleteAsync()
+    {
+        if (_isCompleted) return;
+        _isCompleted = true;
+
+        await stream.WriteAsync(new DataStreamMessage
+        {
+            StreamId = streamId,
+            Sequence = _sequence + 1,
+            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            IsComplete = true
+        });
+    }
+
+    private Google.Protobuf.WellKnownTypes.Any PackPayload<T>(T value)
+    {
+        if (value is null)
+        {
+            return new Google.Protobuf.WellKnownTypes.Any();
+        }
+
+        if (value is Google.Protobuf.IMessage protoMessage)
+        {
+            return Google.Protobuf.WellKnownTypes.Any.Pack(protoMessage);
+        }
+
+        var data = _serializer.Serialize(value);
+        var rawPayload = new RawPayload
+        {
+            Data = Google.Protobuf.ByteString.CopyFrom(data),
+            TypeName = typeof(T).FullName ?? typeof(T).Name,
+            ContentType = _serializer.ContentType
+        };
+
+        return Google.Protobuf.WellKnownTypes.Any.Pack(rawPayload);
+    }
+}
+
+/// <summary>
+/// Default implementation of data stream registry.
+/// </summary>
+public sealed class DataStreamRegistry : IDataStreamRegistry
+{
+    private readonly ConcurrentDictionary<string, DataStreamHandler> _handlers = new();
+
+    public void Register(string topic, DataStreamHandler handler)
+    {
+        _handlers[topic] = handler;
+    }
+
+    public DataStreamHandler? GetHandler(string topic)
+    {
+        return _handlers.TryGetValue(topic, out var handler) ? handler : null;
     }
 }

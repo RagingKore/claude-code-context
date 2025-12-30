@@ -9,6 +9,7 @@ A modern .NET 10 implementation of a full-duplex gRPC protocol where **both clie
 - **Non-Blocking**: Async handlers with proper cancellation support
 - **Handler Registration**: Fluent API for registering typed request handlers
 - **Fire-and-Forget Notifications**: Support for one-way messages
+- **High-Throughput Data Streams**: Separate server-side streaming for volume data
 - **Dual Payload Support**: Use protobuf messages OR C# records (JSON serialized)
 - **`google.protobuf.Any` Payloads**: Type-safe, AOT-compatible message payloads
 - **RFC 7807 ProblemDetails**: Standardized error responses with detailed problem information
@@ -109,6 +110,158 @@ message RawPayload {
 └───────────────┘                                 └───────────────┘
 ```
 
+## High-Throughput Data Streams
+
+For high-volume data that would flood the control channel (RPC), use the separate **server-side streaming** API:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                     TWO CHANNEL ARCHITECTURE                          │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  Control Channel (Open RPC) - Bidirectional                          │
+│  ├─ Request/Response pattern                                         │
+│  ├─ Fire-and-forget notifications                                    │
+│  └─ Low-volume, latency-sensitive                                    │
+│                                                                       │
+│  Data Channel (Subscribe RPC) - Server-side streaming                │
+│  ├─ High-throughput data streams                                     │
+│  ├─ Topic-based subscriptions with filtering                         │
+│  ├─ Rate limiting and cursor-based resumption                        │
+│  └─ Separate streams won't flood control channel                     │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Server: Registering Data Stream Handlers
+
+```csharp
+// Register data stream handlers on server
+var dataStreamRegistry = app.Services.GetRequiredService<IDataStreamRegistry>();
+
+// Counter stream - infinite stream at controlled rate
+dataStreamRegistry.Register("counter", async (context, writer, ct) =>
+{
+    var count = 0L;
+    var delay = TimeSpan.FromMilliseconds(1000.0 / context.MaxRate);
+
+    while (!ct.IsCancellationRequested)
+    {
+        await writer.WriteAsync(new CounterEvent(++count, DateTimeOffset.UtcNow));
+        await Task.Delay(delay, ct);
+    }
+});
+
+// Events stream with filtering
+dataStreamRegistry.Register("events", async (context, writer, ct) =>
+{
+    while (!ct.IsCancellationRequested)
+    {
+        var eventType = GetNextEvent();
+
+        // Apply filter if specified
+        if (!string.IsNullOrEmpty(context.Filter) && !eventType.StartsWith(context.Filter))
+            continue;
+
+        await writer.WriteAsync(
+            new StreamEvent(sequence++, eventType, data, DateTimeOffset.UtcNow),
+            partitionKey: eventType.Split('.')[0],
+            messageType: eventType);
+    }
+});
+
+// Batch stream - finite stream that completes
+dataStreamRegistry.Register("batch", async (context, writer, ct) =>
+{
+    var batchSize = context.Options.GetValueOrDefault("batch_size", "100");
+
+    for (var i = 1; i <= int.Parse(batchSize); i++)
+    {
+        await writer.WriteAsync(new BatchItem(i, $"Item {i}", i * 1.5));
+    }
+    // Stream auto-completes when handler returns
+});
+```
+
+### Client: Subscribing to Data Streams
+
+```csharp
+// Create a data stream client (separate from duplex client)
+await using var streamClient = new DataStreamClient(options);
+
+// Subscribe with async enumerable
+await foreach (var item in streamClient.SubscribeAsync<CounterEvent>(
+    topic: "counter",
+    maxRate: 100,  // max 100 messages/sec
+    cancellationToken: ct))
+{
+    Console.WriteLine($"[{item.Sequence}] Count: {item.Payload?.Count}");
+}
+
+// Subscribe with filtering
+await foreach (var item in streamClient.SubscribeAsync<StreamEvent>(
+    topic: "events",
+    filter: "user",  // only user.* events
+    cancellationToken: ct))
+{
+    Console.WriteLine($"{item.Payload?.EventType}: {item.Payload?.Data}");
+}
+
+// Subscribe to finite batch
+var batchOptions = new Dictionary<string, string> { ["batch_size"] = "50" };
+await foreach (var item in streamClient.SubscribeAsync<BatchItem>(
+    topic: "batch",
+    options: batchOptions))
+{
+    Console.WriteLine($"{item.Payload?.Name} = {item.Payload?.Value}");
+}
+// Loop ends when stream completes
+
+// Callback-based subscription
+await streamClient.SubscribeAsync<StreamEvent>(
+    topic: "events",
+    onMessage: async (item, ct) =>
+    {
+        await ProcessEventAsync(item.Payload);
+    },
+    cancellationToken: ct);
+```
+
+### Data Stream Protocol
+
+```protobuf
+// Subscription request
+message DataStreamRequest {
+  string stream_id = 1;           // Unique subscription ID
+  string topic = 2;               // Topic to subscribe (e.g., "events", "counter")
+  string filter = 3;              // Optional filter expression
+  string cursor = 4;              // Resume from position
+  int32 max_rate = 5;             // Max messages/sec (0 = unlimited)
+  int32 buffer_size = 6;          // Server buffer hint
+  map<string, string> options = 7; // Topic-specific options
+}
+
+// Stream message
+message DataStreamMessage {
+  string stream_id = 1;           // Matches subscription
+  int64 sequence = 2;             // Monotonic sequence number
+  google.protobuf.Any payload = 3; // Message data
+  int64 timestamp_utc = 4;        // Message timestamp
+  string partition_key = 5;       // For ordered delivery
+  string message_type = 6;        // Type hint for routing
+  bool is_complete = 7;           // Final message flag
+  ProblemDetails error = 8;       // Error if stream failed
+}
+```
+
+### Built-in Data Streams
+
+| Topic | Payload Type | Description |
+|-------|--------------|-------------|
+| `counter` | `CounterEvent` | Incrementing numbers at configurable rate |
+| `events` | `StreamEvent` | Simulated event stream with filtering |
+| `batch` | `BatchItem` | Finite batch with `batch_size` option |
+
 ## Project Structure
 
 ```
@@ -117,16 +270,17 @@ prototypes/grpc-bidirectional-channel/
 │   ├── GrpcChannel.Protocol/       # Shared protocol library
 │   │   ├── Contracts/              # IDuplexChannel, IPayloadSerializer
 │   │   ├── Protos/
-│   │   │   ├── channel.proto       # ProtocolDataUnit, RawPayload, ProblemDetails
+│   │   │   ├── channel.proto       # ProtocolDataUnit, DataStream, ProblemDetails
 │   │   │   └── messages.proto      # Sample protobuf message types
 │   │   ├── DuplexChannel.cs        # Core channel implementation
 │   │   └── JsonPayloadSerializer.cs # Default JSON serializer
 │   ├── GrpcChannel.Server/         # gRPC server implementation
-│   │   ├── Services/               # DuplexServiceImpl, ConnectionRegistry
-│   │   └── Program.cs              # Server with protobuf + record handlers
+│   │   ├── Services/               # DuplexServiceImpl, DataStreamRegistry
+│   │   └── Program.cs              # Server with RPC + stream handlers
 │   └── GrpcChannel.Client/         # gRPC client implementation
-│       ├── DuplexClient.cs         # Client wrapper
-│       └── Program.cs              # Client demo with both payload types
+│       ├── DuplexClient.cs         # RPC client wrapper
+│       ├── DataStreamClient.cs     # High-throughput stream client
+│       └── Program.cs              # Demo with RPC + data streams
 ├── GrpcChannel.slnx                # Solution file (XML format)
 └── README.md                       # This file
 ```
