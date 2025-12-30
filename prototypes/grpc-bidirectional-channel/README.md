@@ -38,7 +38,7 @@ message EchoResponse {
 
 ```csharp
 // Packed directly into google.protobuf.Any
-var result = await channel.SendRequestAsync<EchoRequest, EchoResponse>(
+var result = await client.SendRequestAsync<EchoRequest, EchoResponse>(
     "echo",
     new EchoRequest { Message = "Hello!" });
 ```
@@ -52,7 +52,7 @@ public sealed record GreetingRequest(string Name, string? Language = null);
 public sealed record GreetingResponse(string Greeting, DateTimeOffset Timestamp);
 
 // Automatically serialized to JSON, wrapped in RawPayload, then packed into Any
-var result = await channel.SendRequestAsync<GreetingRequest, GreetingResponse>(
+var result = await client.SendRequestAsync<GreetingRequest, GreetingResponse>(
     "greet",
     new GreetingRequest("World", "spanish"));
 ```
@@ -86,12 +86,13 @@ message RawPayload {
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         DuplexChannel                                │
+│                         ProtocolClient                               │
 │  ┌─────────────────────────────────────────────────────────────────┐│
 │  │  • SendRequestAsync<TReq, TRes>() → awaits correlated response  ││
 │  │  • OnRequest<TReq, TRes>() → registers handler                  ││
 │  │  • SendNotificationAsync() → fire-and-forget                    ││
 │  │  • OnNotification() → registers notification handler            ││
+│  │  • SubscribeAsync<T>() → high-throughput data streams           ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
                                   │
@@ -186,12 +187,12 @@ dataStreamRegistry.Register("batch", async (context, writer, ct) =>
 ### Client: Subscribing to Data Streams
 
 ```csharp
-// Use the same ProtocolClient for both RPC and data streams
+// Use ProtocolClient for RPC, notifications, and data streams
 await using var client = new ProtocolClient(options);
 await client.ConnectAsync();
 
 // RPC request
-var result = await client.Channel.SendRequestAsync<EchoRequest, EchoResponse>(
+var result = await client.SendRequestAsync<EchoRequest, EchoResponse>(
     "echo", new EchoRequest { Message = "Hello!" });
 
 // Subscribe to data stream with async enumerable
@@ -370,7 +371,7 @@ message ProblemDetails {
 
 ```csharp
 // Server handler (protobuf)
-channel.OnRequest<EchoRequest, EchoResponse>("echo", async (req, ctx, ct) =>
+client.OnRequest<EchoRequest, EchoResponse>("echo", async (req, ctx, ct) =>
 {
     return new EchoResponse
     {
@@ -380,7 +381,7 @@ channel.OnRequest<EchoRequest, EchoResponse>("echo", async (req, ctx, ct) =>
 });
 
 // Client call (protobuf)
-var result = await channel.SendRequestAsync<EchoRequest, EchoResponse>(
+var result = await client.SendRequestAsync<EchoRequest, EchoResponse>(
     "echo",
     new EchoRequest { Message = "Hello!" });
 ```
@@ -393,7 +394,7 @@ public sealed record GreetingRequest(string Name, string? Language = null);
 public sealed record GreetingResponse(string Greeting, DateTimeOffset Timestamp);
 
 // Server handler (JSON)
-channel.OnRequest<GreetingRequest, GreetingResponse>("greet", async (req, ctx, ct) =>
+client.OnRequest<GreetingRequest, GreetingResponse>("greet", async (req, ctx, ct) =>
 {
     var greeting = req.Language switch
     {
@@ -405,7 +406,7 @@ channel.OnRequest<GreetingRequest, GreetingResponse>("greet", async (req, ctx, c
 });
 
 // Client call (JSON)
-var result = await channel.SendRequestAsync<GreetingRequest, GreetingResponse>(
+var result = await client.SendRequestAsync<GreetingRequest, GreetingResponse>(
     "greet",
     new GreetingRequest("World", "spanish"));
 
@@ -428,7 +429,7 @@ public sealed record ProcessedItem(
     int Length);
 
 // Handler with complex types
-channel.OnRequest<ProcessDataRequest, ProcessDataResponse>("process", async (req, ctx, ct) =>
+client.OnRequest<ProcessDataRequest, ProcessDataResponse>("process", async (req, ctx, ct) =>
 {
     var results = req.Items
         .Select((item, i) => new ProcessedItem(i + 1, item, item.ToUpper(), item.Length))
@@ -480,7 +481,7 @@ services.AddSingleton<IPayloadSerializer, MessagePackSerializer>();
 ## Error Handling
 
 ```csharp
-var result = await channel.SendRequestAsync<Req, Res>("method", request);
+var result = await client.SendRequestAsync<Req, Res>("method", request);
 
 if (result.IsSuccess)
 {

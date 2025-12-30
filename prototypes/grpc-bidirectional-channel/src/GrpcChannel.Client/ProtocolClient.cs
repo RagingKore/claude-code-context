@@ -31,12 +31,6 @@ public sealed class ProtocolClient(
     private SemaphoreSlim? _writeLock;
 
     /// <summary>
-    /// Gets the underlying duplex channel for registering handlers and sending requests.
-    /// </summary>
-    public IDuplexChannel Channel => _duplexChannel
-        ?? throw new InvalidOperationException("Not connected. Call ConnectAsync first.");
-
-    /// <summary>
     /// Indicates whether the client is connected to the server.
     /// </summary>
     public bool IsConnected => _duplexChannel?.IsConnected ?? false;
@@ -45,6 +39,22 @@ public sealed class ProtocolClient(
     /// Gets the client options.
     /// </summary>
     public ProtocolClientOptions Options => options;
+
+    /// <summary>
+    /// Event raised when the connection state changes.
+    /// </summary>
+    public event EventHandler<ChannelStateChangedEventArgs>? StateChanged;
+
+    /// <summary>
+    /// Event raised when a channel-level error occurs.
+    /// </summary>
+    public event EventHandler<ChannelErrorEventArgs>? Error;
+
+    /// <summary>
+    /// Gets the channel, throwing if not connected.
+    /// </summary>
+    private DuplexChannel Channel => _duplexChannel
+        ?? throw new InvalidOperationException("Not connected. Call ConnectAsync first.");
 
     /// <summary>
     /// Ensures the gRPC client is initialized (for streaming without full connection).
@@ -104,6 +114,10 @@ public sealed class ProtocolClient(
         // Create the duplex channel with serializer
         var channelId = Guid.NewGuid().ToString("N");
         _duplexChannel = new DuplexChannel(channelId, _serializer);
+
+        // Forward events from the channel
+        _duplexChannel.StateChanged += (s, e) => StateChanged?.Invoke(this, e);
+        _duplexChannel.Error += (s, e) => Error?.Invoke(this, e);
 
         // Attach the sender
         _duplexChannel.AttachSender(
@@ -170,6 +184,71 @@ public sealed class ProtocolClient(
             _duplexChannel?.Disconnect("Client disconnected");
         }
     }
+
+    // =========================================================================
+    // RPC OPERATIONS
+    // =========================================================================
+
+    /// <summary>
+    /// Sends a request and awaits the correlated response.
+    /// </summary>
+    /// <typeparam name="TRequest">Request payload type (protobuf IMessage or any serializable type).</typeparam>
+    /// <typeparam name="TResponse">Response payload type (protobuf IMessage or any serializable type).</typeparam>
+    /// <param name="method">The method/handler name to invoke on the server.</param>
+    /// <param name="request">The request payload.</param>
+    /// <param name="timeoutMs">Optional timeout in milliseconds.</param>
+    /// <param name="headers">Optional request headers.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The response result.</returns>
+    public ValueTask<DuplexResult<TResponse>> SendRequestAsync<TRequest, TResponse>(
+        string method,
+        TRequest request,
+        int? timeoutMs = null,
+        IReadOnlyDictionary<string, string>? headers = null,
+        CancellationToken cancellationToken = default)
+        => Channel.SendRequestAsync<TRequest, TResponse>(method, request, timeoutMs, headers, cancellationToken);
+
+    /// <summary>
+    /// Sends a fire-and-forget notification (no response expected).
+    /// </summary>
+    /// <typeparam name="T">Notification payload type.</typeparam>
+    /// <param name="topic">The notification topic.</param>
+    /// <param name="payload">The notification payload.</param>
+    /// <param name="headers">Optional headers.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public ValueTask SendNotificationAsync<T>(
+        string topic,
+        T payload,
+        IReadOnlyDictionary<string, string>? headers = null,
+        CancellationToken cancellationToken = default)
+        => Channel.SendNotificationAsync(topic, payload, headers, cancellationToken);
+
+    /// <summary>
+    /// Registers a request handler for a specific method.
+    /// The server can invoke this handler by sending a request with the matching method name.
+    /// </summary>
+    /// <typeparam name="TRequest">Request payload type (protobuf IMessage or any serializable type).</typeparam>
+    /// <typeparam name="TResponse">Response payload type (protobuf IMessage or any serializable type).</typeparam>
+    /// <param name="method">The method name to handle.</param>
+    /// <param name="handler">The handler function.</param>
+    /// <returns>A disposable that unregisters the handler when disposed.</returns>
+    public IDisposable OnRequest<TRequest, TResponse>(
+        string method,
+        Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler)
+        => Channel.OnRequest<TRequest, TResponse>(method, handler);
+
+    /// <summary>
+    /// Registers a notification handler for a specific topic.
+    /// The server can send notifications that will be handled by this handler.
+    /// </summary>
+    /// <typeparam name="T">Notification payload type (protobuf IMessage or any serializable type).</typeparam>
+    /// <param name="topic">The topic to subscribe to.</param>
+    /// <param name="handler">The handler function.</param>
+    /// <returns>A disposable that unregisters the handler when disposed.</returns>
+    public IDisposable OnNotification<T>(
+        string topic,
+        Func<T, NotificationContext, CancellationToken, ValueTask> handler)
+        => Channel.OnNotification<T>(topic, handler);
 
     // =========================================================================
     // HIGH-THROUGHPUT DATA STREAMS

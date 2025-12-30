@@ -1,5 +1,4 @@
 using GrpcChannel.Client;
-using GrpcChannel.Protocol.Contracts;
 using GrpcChannel.Protocol.Messages;
 using Microsoft.Extensions.Logging;
 
@@ -28,16 +27,16 @@ try
     Console.WriteLine($"Connected!\n");
 
     // Register client-side handlers (server can call these)
-    RegisterClientHandlers(client.Channel, logger);
+    RegisterClientHandlers(client, logger);
 
     // Demo: Protobuf message requests
-    await DemoProtobufRequests(client.Channel, logger);
+    await DemoProtobufRequests(client, logger);
 
     // Demo: C# record requests (JSON serialized)
-    await DemoRecordRequests(client.Channel, logger);
+    await DemoRecordRequests(client, logger);
 
     // Demo: Notifications
-    await DemoNotifications(client.Channel, logger);
+    await DemoNotifications(client, logger);
 
     // Demo: High-throughput data streams (uses same client)
     await DemoDataStreams(client, logger);
@@ -53,12 +52,12 @@ catch (Exception ex)
     Console.WriteLine("Make sure the server is running on https://localhost:5001");
 }
 
-static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
+static void RegisterClientHandlers(ProtocolClient client, ILogger logger)
 {
     Console.WriteLine("--- Registering Client-Side Handlers ---\n");
 
     // Handler for server-initiated ping requests (protobuf)
-    channel.OnRequest<ServerPingRequest, ClientPongResponse>("client.ping", async (request, ctx, ct) =>
+    client.OnRequest<ServerPingRequest, ClientPongResponse>("client.ping", async (request, ctx, ct) =>
     {
         logger.LogInformation("[Proto] Server pinged client: {Message}", request.Message);
         return new ClientPongResponse
@@ -69,7 +68,7 @@ static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
     });
 
     // Handler for server requesting client info (protobuf)
-    channel.OnRequest<GetClientInfoRequest, ClientInfoResponse>("client.info", async (request, ctx, ct) =>
+    client.OnRequest<GetClientInfoRequest, ClientInfoResponse>("client.info", async (request, ctx, ct) =>
     {
         logger.LogInformation("[Proto] Server requested client info");
         return new ClientInfoResponse
@@ -82,7 +81,7 @@ static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
     });
 
     // Handler for server-initiated computation (protobuf)
-    channel.OnRequest<ComputeRequest, ComputeResponse>("client.compute", async (request, ctx, ct) =>
+    client.OnRequest<ComputeRequest, ComputeResponse>("client.compute", async (request, ctx, ct) =>
     {
         logger.LogInformation("[Proto] Server requested computation: {Expression}", request.Expression);
 
@@ -102,7 +101,7 @@ static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
     });
 
     // Handler for C# record requests from server (JSON)
-    channel.OnRequest<ClientHealthCheckRequest, ClientHealthCheckResponse>("client.health", async (request, ctx, ct) =>
+    client.OnRequest<ClientHealthCheckRequest, ClientHealthCheckResponse>("client.health", async (request, ctx, ct) =>
     {
         logger.LogInformation("[JSON] Server requested health check");
         return new ClientHealthCheckResponse(
@@ -113,13 +112,13 @@ static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
     });
 
     // Handler for broadcast notifications from server (protobuf)
-    channel.OnNotification<BroadcastNotification>("broadcast", async (notification, ctx, ct) =>
+    client.OnNotification<BroadcastNotification>("broadcast", async (notification, ctx, ct) =>
     {
         Console.WriteLine($"\n[Proto BROADCAST] {notification.Message}");
     });
 
     // Handler for custom record notifications (JSON)
-    channel.OnNotification<ServerNotificationRecord>("server.notification", async (notification, ctx, ct) =>
+    client.OnNotification<ServerNotificationRecord>("server.notification", async (notification, ctx, ct) =>
     {
         Console.WriteLine($"\n[JSON NOTIFICATION] {notification.Type}: {notification.Message}");
     });
@@ -128,13 +127,13 @@ static void RegisterClientHandlers(IDuplexChannel channel, ILogger logger)
     Console.WriteLine("Registered JSON handlers: client.health, server.notification\n");
 }
 
-static async Task DemoProtobufRequests(IDuplexChannel channel, ILogger logger)
+static async Task DemoProtobufRequests(ProtocolClient client, ILogger logger)
 {
     Console.WriteLine("=== PROTOBUF MESSAGE REQUESTS ===\n");
 
     // 1. Ping
     Console.WriteLine("1. Ping (protobuf):");
-    var pingResult = await channel.SendRequestAsync<PingRequest, PongResponse>("ping", new PingRequest());
+    var pingResult = await client.SendRequestAsync<PingRequest, PongResponse>("ping", new PingRequest());
     if (pingResult.IsSuccess)
     {
         Console.WriteLine($"   Pong: {pingResult.Value!.Message} (RTT: {pingResult.DurationMs}ms)");
@@ -146,7 +145,7 @@ static async Task DemoProtobufRequests(IDuplexChannel channel, ILogger logger)
 
     // 2. Echo
     Console.WriteLine("\n2. Echo (protobuf):");
-    var echoResult = await channel.SendRequestAsync<EchoRequest, EchoResponse>(
+    var echoResult = await client.SendRequestAsync<EchoRequest, EchoResponse>(
         "echo",
         new EchoRequest { Message = "Hello from bidirectional client!" });
     if (echoResult.IsSuccess)
@@ -156,7 +155,7 @@ static async Task DemoProtobufRequests(IDuplexChannel channel, ILogger logger)
 
     // 3. Status
     Console.WriteLine("\n3. Status (protobuf):");
-    var statusResult = await channel.SendRequestAsync<StatusRequest, StatusResponse>("status", new StatusRequest());
+    var statusResult = await client.SendRequestAsync<StatusRequest, StatusResponse>("status", new StatusRequest());
     if (statusResult.IsSuccess)
     {
         var status = statusResult.Value!;
@@ -175,7 +174,7 @@ static async Task DemoProtobufRequests(IDuplexChannel channel, ILogger logger)
 
     foreach (var (op, a, b) in operations)
     {
-        var mathResult = await channel.SendRequestAsync<MathRequest, MathResponse>(
+        var mathResult = await client.SendRequestAsync<MathRequest, MathResponse>(
             "math",
             new MathRequest { Operation = op, A = a, B = b });
 
@@ -186,13 +185,13 @@ static async Task DemoProtobufRequests(IDuplexChannel channel, ILogger logger)
     }
 }
 
-static async Task DemoRecordRequests(IDuplexChannel channel, ILogger logger)
+static async Task DemoRecordRequests(ProtocolClient client, ILogger logger)
 {
     Console.WriteLine("\n=== C# RECORD REQUESTS (JSON serialized) ===\n");
 
     // 1. Greeting (simple record)
     Console.WriteLine("1. Greeting (C# record):");
-    var greetResult = await channel.SendRequestAsync<GreetingRequest, GreetingResponse>(
+    var greetResult = await client.SendRequestAsync<GreetingRequest, GreetingResponse>(
         "greet",
         new GreetingRequest("World", "spanish"));
     if (greetResult.IsSuccess)
@@ -207,7 +206,7 @@ static async Task DemoRecordRequests(IDuplexChannel channel, ILogger logger)
 
     // 2. Process data (complex nested records)
     Console.WriteLine("\n2. Process Data (nested records):");
-    var processResult = await channel.SendRequestAsync<ProcessDataRequest, ProcessDataResponse>(
+    var processResult = await client.SendRequestAsync<ProcessDataRequest, ProcessDataResponse>(
         "process",
         new ProcessDataRequest(["hello", "world", "duplex"]));
     if (processResult.IsSuccess)
@@ -222,7 +221,7 @@ static async Task DemoRecordRequests(IDuplexChannel channel, ILogger logger)
 
     // 3. Get user (record with collections and dictionary)
     Console.WriteLine("\n3. Get User (record with collections):");
-    var userResult = await channel.SendRequestAsync<GetUserRequest, UserInfo>(
+    var userResult = await client.SendRequestAsync<GetUserRequest, UserInfo>(
         "user.get",
         new GetUserRequest(42));
     if (userResult.IsSuccess)
@@ -238,7 +237,7 @@ static async Task DemoRecordRequests(IDuplexChannel channel, ILogger logger)
     // 4. Timeout test
     Console.WriteLine("\n4. Timeout Test (protobuf):");
     Console.WriteLine("   Requesting 3000ms delay with 1000ms timeout...");
-    var timeoutResult = await channel.SendRequestAsync<DelayRequest, DelayResponse>(
+    var timeoutResult = await client.SendRequestAsync<DelayRequest, DelayResponse>(
         "delay",
         new DelayRequest { DelayMs = 3000 },
         timeoutMs: 1000);
@@ -246,19 +245,19 @@ static async Task DemoRecordRequests(IDuplexChannel channel, ILogger logger)
 
     // 5. Method not found test
     Console.WriteLine("\n5. Not Found Test:");
-    var notFoundResult = await channel.SendRequestAsync<GreetingRequest, GreetingResponse>(
+    var notFoundResult = await client.SendRequestAsync<GreetingRequest, GreetingResponse>(
         "nonexistent.method",
         new GreetingRequest("test"));
     Console.WriteLine($"   Status: {notFoundResult.Status} - {notFoundResult.Problem?.Detail}");
 }
 
-static async Task DemoNotifications(IDuplexChannel channel, ILogger logger)
+static async Task DemoNotifications(ProtocolClient client, ILogger logger)
 {
     Console.WriteLine("\n=== NOTIFICATIONS ===\n");
 
     // Send protobuf notification
     Console.WriteLine("Sending protobuf notification...");
-    await channel.SendNotificationAsync(
+    await client.SendNotificationAsync(
         "client.event",
         new ClientEventNotification
         {
@@ -270,7 +269,7 @@ static async Task DemoNotifications(IDuplexChannel channel, ILogger logger)
 
     // Send C# record notification
     Console.WriteLine("Sending C# record notification...");
-    await channel.SendNotificationAsync(
+    await client.SendNotificationAsync(
         "custom.event",
         new CustomEventRecord("demo_event", new { Source = "client", Action = "test" }, DateTimeOffset.UtcNow));
     Console.WriteLine("JSON notification sent");
