@@ -10,11 +10,14 @@ namespace GrpcChannel.Client;
 /// <summary>
 /// Duplex client that connects to a gRPC duplex server.
 /// Supports bidirectional request/response with handler registration.
+/// Handles both protobuf messages and arbitrary types (via serializer).
 /// </summary>
 /// <param name="options">Connection options.</param>
+/// <param name="serializer">Optional payload serializer for non-protobuf types. Defaults to JSON.</param>
 /// <param name="logger">Optional logger.</param>
 public sealed class DuplexClient(
     DuplexClientOptions options,
+    IPayloadSerializer? serializer = null,
     ILogger<DuplexClient>? logger = null) : IAsyncDisposable
 {
     private GrpcChannel? _grpcChannel;
@@ -77,9 +80,9 @@ public sealed class DuplexClient(
         _streamingCall = _client.Open(metadata, cancellationToken: _connectionCts.Token);
         _writeLock = new SemaphoreSlim(1, 1);
 
-        // Create the duplex channel
+        // Create the duplex channel with serializer
         var channelId = Guid.NewGuid().ToString("N");
-        _duplexChannel = new DuplexChannel(channelId);
+        _duplexChannel = new DuplexChannel(channelId, serializer);
 
         // Attach the sender
         _duplexChannel.AttachSender(

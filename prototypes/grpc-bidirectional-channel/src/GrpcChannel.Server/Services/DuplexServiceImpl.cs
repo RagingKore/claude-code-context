@@ -9,14 +9,17 @@ namespace GrpcChannel.Server.Services;
 /// <summary>
 /// gRPC service implementation for the duplex channel.
 /// Manages connections and provides bidirectional RPC for both sides.
+/// Handles both protobuf messages and arbitrary types (via serializer).
 /// </summary>
 /// <param name="logger">Logger instance.</param>
 /// <param name="connectionRegistry">Connection registry for tracking active channels.</param>
 /// <param name="hostEnvironment">Host environment for determining debug mode.</param>
+/// <param name="serializer">Optional payload serializer for non-protobuf types. Defaults to JSON.</param>
 public sealed class DuplexServiceImpl(
     ILogger<DuplexServiceImpl> logger,
     IConnectionRegistry connectionRegistry,
-    IHostEnvironment hostEnvironment) : DuplexService.DuplexServiceBase
+    IHostEnvironment hostEnvironment,
+    IPayloadSerializer? serializer = null) : DuplexService.DuplexServiceBase
 {
     /// <summary>
     /// Opens a bidirectional duplex channel.
@@ -31,7 +34,7 @@ public sealed class DuplexServiceImpl(
 
         logger.LogInformation("Client {ClientId} connected, channel {ChannelId}", clientId, channelId);
 
-        var channel = new DuplexChannel(channelId);
+        var channel = new DuplexChannel(channelId, serializer);
 
         // Attach the gRPC stream as the sender
         var writeLock = new SemaphoreSlim(1, 1);

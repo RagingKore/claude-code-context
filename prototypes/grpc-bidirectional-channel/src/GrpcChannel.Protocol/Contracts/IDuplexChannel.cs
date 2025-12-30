@@ -3,6 +3,7 @@ namespace GrpcChannel.Protocol.Contracts;
 /// <summary>
 /// Represents a bidirectional duplex channel where both sides can send
 /// requests and receive correlated responses.
+/// Supports both protobuf messages (IMessage) and arbitrary types (via serializer).
 /// </summary>
 public interface IDuplexChannel : IAsyncDisposable
 {
@@ -19,8 +20,8 @@ public interface IDuplexChannel : IAsyncDisposable
     /// <summary>
     /// Sends a request and awaits the correlated response.
     /// </summary>
-    /// <typeparam name="TRequest">Request payload type.</typeparam>
-    /// <typeparam name="TResponse">Response payload type.</typeparam>
+    /// <typeparam name="TRequest">Request payload type (protobuf IMessage or any serializable type).</typeparam>
+    /// <typeparam name="TResponse">Response payload type (protobuf IMessage or any serializable type).</typeparam>
     /// <param name="method">The method/handler name to invoke on the remote side.</param>
     /// <param name="request">The request payload.</param>
     /// <param name="timeoutMs">Optional timeout in milliseconds.</param>
@@ -32,9 +33,7 @@ public interface IDuplexChannel : IAsyncDisposable
         TRequest request,
         int? timeoutMs = null,
         IReadOnlyDictionary<string, string>? headers = null,
-        CancellationToken cancellationToken = default)
-        where TRequest : IMessage
-        where TResponse : IMessage, new();
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sends a fire-and-forget notification (no response expected).
@@ -43,45 +42,36 @@ public interface IDuplexChannel : IAsyncDisposable
         string topic,
         T payload,
         IReadOnlyDictionary<string, string>? headers = null,
-        CancellationToken cancellationToken = default)
-        where T : IMessage;
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Registers a request handler for a specific method.
     /// </summary>
-    /// <typeparam name="TRequest">Request payload type.</typeparam>
-    /// <typeparam name="TResponse">Response payload type.</typeparam>
+    /// <typeparam name="TRequest">Request payload type (protobuf IMessage or any serializable type).</typeparam>
+    /// <typeparam name="TResponse">Response payload type (protobuf IMessage or any serializable type).</typeparam>
     /// <param name="method">The method name to handle.</param>
     /// <param name="handler">The handler function.</param>
     /// <returns>A disposable that unregisters the handler when disposed.</returns>
     IDisposable OnRequest<TRequest, TResponse>(
         string method,
-        Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler)
-        where TRequest : IMessage, new()
-        where TResponse : IMessage;
+        Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler);
 
     /// <summary>
     /// Registers a notification handler for a specific topic.
     /// </summary>
-    /// <typeparam name="T">Notification payload type.</typeparam>
+    /// <typeparam name="T">Notification payload type (protobuf IMessage or any serializable type).</typeparam>
     /// <param name="topic">The topic to subscribe to.</param>
     /// <param name="handler">The handler function.</param>
     /// <returns>A disposable that unregisters the handler when disposed.</returns>
     IDisposable OnNotification<T>(
         string topic,
-        Func<T, NotificationContext, CancellationToken, ValueTask> handler)
-        where T : IMessage, new();
+        Func<T, NotificationContext, CancellationToken, ValueTask> handler);
 
     /// <summary>
     /// Event raised when the connection state changes.
     /// </summary>
     event EventHandler<ChannelStateChangedEventArgs>? StateChanged;
 }
-
-/// <summary>
-/// Marker interface for protobuf messages.
-/// </summary>
-public interface IMessage;
 
 /// <summary>
 /// Result of a duplex request.

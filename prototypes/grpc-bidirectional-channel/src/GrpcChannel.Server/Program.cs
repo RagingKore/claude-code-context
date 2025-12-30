@@ -32,10 +32,14 @@ var registry = app.Services.GetRequiredService<IConnectionRegistry>();
 // Register handlers that will be applied to all client channels
 registry.OnAllChannels(channel =>
 {
-    // Echo handler
+    // =============================================
+    // PROTOBUF MESSAGE HANDLERS (from messages.proto)
+    // =============================================
+
+    // Echo handler - uses protobuf messages
     channel.OnRequest<EchoRequest, EchoResponse>("echo", async (request, ctx, ct) =>
     {
-        app.Logger.LogDebug("Echo request from {RemoteId}: {Message}", ctx.RemoteId, request.Message);
+        app.Logger.LogDebug("[Proto] Echo request from {RemoteId}: {Message}", ctx.RemoteId, request.Message);
         return new EchoResponse
         {
             Message = request.Message,
@@ -43,7 +47,7 @@ registry.OnAllChannels(channel =>
         };
     });
 
-    // Ping handler
+    // Ping handler - uses protobuf messages
     channel.OnRequest<PingRequest, PongResponse>("ping", async (request, ctx, ct) =>
     {
         return new PongResponse
@@ -53,7 +57,7 @@ registry.OnAllChannels(channel =>
         };
     });
 
-    // Status handler
+    // Status handler - uses protobuf messages
     channel.OnRequest<StatusRequest, StatusResponse>("status", async (request, ctx, ct) =>
     {
         var channels = registry.GetAllChannels();
@@ -67,7 +71,7 @@ registry.OnAllChannels(channel =>
         return response;
     });
 
-    // Math handler
+    // Math handler - uses protobuf messages
     channel.OnRequest<MathRequest, MathResponse>("math", async (request, ctx, ct) =>
     {
         var result = request.Operation.ToLowerInvariant() switch
@@ -88,7 +92,7 @@ registry.OnAllChannels(channel =>
         };
     });
 
-    // Delay handler (for testing timeouts)
+    // Delay handler - uses protobuf messages
     channel.OnRequest<DelayRequest, DelayResponse>("delay", async (request, ctx, ct) =>
     {
         await Task.Delay(request.DelayMs, ct);
@@ -99,7 +103,7 @@ registry.OnAllChannels(channel =>
         };
     });
 
-    // Broadcast handler - server can send requests to clients too!
+    // Broadcast handler - uses protobuf messages
     channel.OnRequest<BroadcastRequest, BroadcastResponse>("broadcast", async (request, ctx, ct) =>
     {
         var sent = 0;
@@ -120,11 +124,74 @@ registry.OnAllChannels(channel =>
         return new BroadcastResponse { SentCount = sent };
     });
 
-    // Subscribe to notifications from clients
+    // Subscribe to notifications from clients - uses protobuf messages
     channel.OnNotification<ClientEventNotification>("client.event", async (notification, ctx, ct) =>
     {
-        app.Logger.LogInformation("Received notification from {RemoteId}: {EventType} - {Data}",
+        app.Logger.LogInformation("[Proto] Received notification from {RemoteId}: {EventType} - {Data}",
             ctx.RemoteId, notification.EventType, notification.Data);
+    });
+
+    // =============================================
+    // C# RECORD HANDLERS (serialized via JSON)
+    // =============================================
+
+    // Greeting handler - uses C# records (serialized with JSON)
+    channel.OnRequest<GreetingRequest, GreetingResponse>("greet", async (request, ctx, ct) =>
+    {
+        app.Logger.LogDebug("[JSON] Greeting request from {RemoteId}: {Name}", ctx.RemoteId, request.Name);
+        var greeting = request.Language?.ToLowerInvariant() switch
+        {
+            "spanish" or "es" => $"¡Hola, {request.Name}!",
+            "french" or "fr" => $"Bonjour, {request.Name}!",
+            "german" or "de" => $"Hallo, {request.Name}!",
+            "japanese" or "ja" => $"こんにちは、{request.Name}さん！",
+            _ => $"Hello, {request.Name}!"
+        };
+
+        return new GreetingResponse(greeting, DateTimeOffset.UtcNow);
+    });
+
+    // Complex data handler - uses C# records with nested types
+    channel.OnRequest<ProcessDataRequest, ProcessDataResponse>("process", async (request, ctx, ct) =>
+    {
+        app.Logger.LogDebug("[JSON] Processing data: {Items} items", request.Items.Count);
+
+        var results = request.Items
+            .Select((item, index) => new ProcessedItem(
+                Id: index + 1,
+                OriginalValue: item,
+                ProcessedValue: item.ToUpperInvariant(),
+                Length: item.Length))
+            .ToList();
+
+        return new ProcessDataResponse(
+            Results: results,
+            TotalProcessed: results.Count,
+            ProcessedAt: DateTimeOffset.UtcNow);
+    });
+
+    // User info handler - demonstrates record with multiple properties
+    channel.OnRequest<GetUserRequest, UserInfo>("user.get", async (request, ctx, ct) =>
+    {
+        // Simulate user lookup
+        return new UserInfo(
+            Id: request.UserId,
+            Name: $"User {request.UserId}",
+            Email: $"user{request.UserId}@example.com",
+            Roles: ["user", "member"],
+            Metadata: new Dictionary<string, string>
+            {
+                ["source"] = "demo",
+                ["channel"] = ctx.RemoteId ?? "unknown"
+            },
+            CreatedAt: DateTimeOffset.UtcNow.AddDays(-30));
+    });
+
+    // Subscribe to custom record notifications
+    channel.OnNotification<CustomEventRecord>("custom.event", async (notification, ctx, ct) =>
+    {
+        app.Logger.LogInformation("[JSON] Custom event from {RemoteId}: {Type} - {Payload}",
+            ctx.RemoteId, notification.EventType, notification.Payload);
     });
 });
 
@@ -141,6 +208,33 @@ app.MapGet("/", () => Results.Ok(new
 
 // Startup message
 app.Logger.LogInformation("gRPC Duplex Server starting on https://localhost:5001");
-app.Logger.LogInformation("Available methods: echo, ping, status, math, delay, broadcast");
+app.Logger.LogInformation("Protobuf methods: echo, ping, status, math, delay, broadcast");
+app.Logger.LogInformation("C# record methods: greet, process, user.get");
 
 await app.RunAsync();
+
+// =============================================
+// C# RECORD TYPES (serialized with JSON via RawPayload)
+// =============================================
+
+// Greeting request/response
+public sealed record GreetingRequest(string Name, string? Language = null);
+public sealed record GreetingResponse(string Greeting, DateTimeOffset Timestamp);
+
+// Complex data processing
+public sealed record ProcessDataRequest(List<string> Items);
+public sealed record ProcessDataResponse(List<ProcessedItem> Results, int TotalProcessed, DateTimeOffset ProcessedAt);
+public sealed record ProcessedItem(int Id, string OriginalValue, string ProcessedValue, int Length);
+
+// User info
+public sealed record GetUserRequest(int UserId);
+public sealed record UserInfo(
+    int Id,
+    string Name,
+    string Email,
+    List<string> Roles,
+    Dictionary<string, string> Metadata,
+    DateTimeOffset CreatedAt);
+
+// Custom event notification
+public sealed record CustomEventRecord(string EventType, object? Payload, DateTimeOffset Timestamp);

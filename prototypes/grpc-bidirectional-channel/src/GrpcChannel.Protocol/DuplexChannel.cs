@@ -14,11 +14,14 @@ namespace GrpcChannel.Protocol;
 /// <summary>
 /// Core duplex channel implementation providing bidirectional request/response
 /// with handler registration. This class is used by both client and server.
-/// Uses protobuf Any for typed message payloads.
+/// Supports both protobuf messages (packed directly into Any) and arbitrary types
+/// (serialized and wrapped in RawPayload).
 /// </summary>
 /// <param name="channelId">Unique channel identifier.</param>
-public sealed class DuplexChannel(string channelId) : IDuplexChannel
+/// <param name="serializer">Optional serializer for non-protobuf types. Defaults to JSON.</param>
+public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializer = null) : IDuplexChannel
 {
+    private readonly IPayloadSerializer _serializer = serializer ?? JsonPayloadSerializer.Default;
     private readonly ConcurrentDictionary<string, PendingRequest> _pendingRequests = new();
     private readonly ConcurrentDictionary<string, IRequestHandler> _requestHandlers = new();
     private readonly ConcurrentDictionary<string, INotificationHandler> _notificationHandlers = new();
@@ -85,14 +88,12 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
         int? timeoutMs = null,
         IReadOnlyDictionary<string, string>? headers = null,
         CancellationToken cancellationToken = default)
-        where TRequest : Contracts.IMessage
-        where TResponse : Contracts.IMessage, new()
     {
         EnsureConnected();
 
         var correlationId = Guid.NewGuid().ToString("N");
         var tcs = new TaskCompletionSource<DuplexMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var pending = new PendingRequest(correlationId, tcs, Stopwatch.StartNew(), timeoutMs);
+        var pending = new PendingRequest(correlationId, tcs, Stopwatch.StartNew(), timeoutMs, typeof(TResponse));
 
         if (!_pendingRequests.TryAdd(correlationId, pending))
         {
@@ -106,14 +107,9 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
                 Id = Guid.NewGuid().ToString("N"),
                 CorrelationId = correlationId,
                 Method = method,
+                Payload = PackPayload(request),
                 TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
-
-            // Pack the request into Any
-            if (request is Google.Protobuf.IMessage protoRequest)
-            {
-                message.Payload = Any.Pack(protoRequest);
-            }
 
             if (timeoutMs.HasValue)
             {
@@ -157,10 +153,7 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
 
             if (response.Status == ProtoStatusCode.Ok)
             {
-                // Unpack the response from Any
-                var responsePayload = response.Payload?.Unpack<TResponse>()
-                    ?? throw new InvalidOperationException("Response payload is null");
-
+                var responsePayload = UnpackPayload<TResponse>(response.Payload);
                 return DuplexResult<TResponse>.Ok(responsePayload, pending.Stopwatch.ElapsedMilliseconds, responseHeaders);
             }
 
@@ -194,7 +187,6 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
         T payload,
         IReadOnlyDictionary<string, string>? headers = null,
         CancellationToken cancellationToken = default)
-        where T : Contracts.IMessage
     {
         EnsureConnected();
 
@@ -203,13 +195,9 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
             Id = Guid.NewGuid().ToString("N"),
             Method = topic, // For notifications, method is the topic
             // No correlation_id for notifications
+            Payload = PackPayload(payload),
             TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         };
-
-        if (payload is Google.Protobuf.IMessage protoPayload)
-        {
-            message.Payload = Any.Pack(protoPayload);
-        }
 
         if (headers is not null)
         {
@@ -225,10 +213,8 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
     public IDisposable OnRequest<TRequest, TResponse>(
         string method,
         Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler)
-        where TRequest : Contracts.IMessage, new()
-        where TResponse : Contracts.IMessage
     {
-        var wrapper = new RequestHandler<TRequest, TResponse>(handler);
+        var wrapper = new RequestHandler<TRequest, TResponse>(handler, this);
         _requestHandlers[method] = wrapper;
         return new HandlerRegistration(() => _requestHandlers.TryRemove(method, out _));
     }
@@ -236,9 +222,8 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
     public IDisposable OnNotification<T>(
         string topic,
         Func<T, NotificationContext, CancellationToken, ValueTask> handler)
-        where T : Contracts.IMessage, new()
     {
-        var wrapper = new NotificationHandler<T>(handler);
+        var wrapper = new NotificationHandler<T>(handler, this);
         _notificationHandlers[topic] = wrapper;
         return new HandlerRegistration(() => _notificationHandlers.TryRemove(topic, out _));
     }
@@ -275,6 +260,95 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
                 new DuplexException(StatusCode.Error, ProblemDetails.FromError(StatusCode.Error, reason ?? "Channel disconnected")));
         }
         _pendingRequests.Clear();
+    }
+
+    /// <summary>
+    /// Packs a payload into protobuf Any.
+    /// For IMessage types: packs directly.
+    /// For other types: serializes to RawPayload wrapper, then packs.
+    /// </summary>
+    internal Any PackPayload<T>(T value)
+    {
+        if (value is null)
+        {
+            return new Any();
+        }
+
+        // If it's already a protobuf message, pack directly
+        if (value is IMessage protoMessage)
+        {
+            return Any.Pack(protoMessage);
+        }
+
+        // Otherwise, serialize and wrap in RawPayload
+        var data = _serializer.Serialize(value);
+        var rawPayload = new RawPayload
+        {
+            Data = Google.Protobuf.ByteString.CopyFrom(data),
+            TypeName = typeof(T).FullName ?? typeof(T).Name,
+            ContentType = _serializer.ContentType
+        };
+
+        return Any.Pack(rawPayload);
+    }
+
+    /// <summary>
+    /// Unpacks a payload from protobuf Any.
+    /// Detects whether it's a direct IMessage or a RawPayload wrapper.
+    /// </summary>
+    internal T UnpackPayload<T>(Any? any)
+    {
+        if (any is null || any.TypeUrl == string.Empty)
+        {
+            return default!;
+        }
+
+        // Check if it's a RawPayload wrapper
+        if (any.Is(RawPayload.Descriptor))
+        {
+            var rawPayload = any.Unpack<RawPayload>();
+            return _serializer.Deserialize<T>(rawPayload.Data.ToByteArray());
+        }
+
+        // Otherwise, it's a direct protobuf message
+        if (typeof(IMessage).IsAssignableFrom(typeof(T)))
+        {
+            return any.Unpack<T>();
+        }
+
+        // Type mismatch - try to deserialize anyway (shouldn't happen normally)
+        throw new InvalidOperationException(
+            $"Cannot unpack payload of type '{any.TypeUrl}' as '{typeof(T).Name}'. " +
+            "Expected either a protobuf IMessage or RawPayload wrapper.");
+    }
+
+    /// <summary>
+    /// Unpacks a payload from protobuf Any to a specific type.
+    /// Used by handlers when the type is known at runtime.
+    /// </summary>
+    internal object UnpackPayload(Any? any, Type targetType)
+    {
+        if (any is null || any.TypeUrl == string.Empty)
+        {
+            return Activator.CreateInstance(targetType)!;
+        }
+
+        // Check if it's a RawPayload wrapper
+        if (any.Is(RawPayload.Descriptor))
+        {
+            var rawPayload = any.Unpack<RawPayload>();
+            return _serializer.Deserialize(rawPayload.Data.ToByteArray(), targetType);
+        }
+
+        // Otherwise, it's a direct protobuf message - use reflection to call Unpack<T>
+        if (typeof(IMessage).IsAssignableFrom(targetType))
+        {
+            var unpackMethod = typeof(Any).GetMethod(nameof(Any.Unpack))!.MakeGenericMethod(targetType);
+            return unpackMethod.Invoke(any, null)!;
+        }
+
+        throw new InvalidOperationException(
+            $"Cannot unpack payload of type '{any.TypeUrl}' as '{targetType.Name}'.");
     }
 
     private async ValueTask HandleIncomingRequestAsync(DuplexMessage message, CancellationToken cancellationToken)
@@ -486,31 +560,24 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
     }
 
     private sealed class RequestHandler<TRequest, TResponse>(
-        Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler) : IRequestHandler
-        where TRequest : Contracts.IMessage, new()
-        where TResponse : Contracts.IMessage
+        Func<TRequest, RequestContext, CancellationToken, ValueTask<TResponse>> handler,
+        DuplexChannel channel) : IRequestHandler
     {
         public async ValueTask<Any?> HandleAsync(Any? payload, RequestContext context, CancellationToken cancellationToken)
         {
-            var request = payload?.Unpack<TRequest>() ?? new TRequest();
+            var request = channel.UnpackPayload<TRequest>(payload);
             var response = await handler(request, context, cancellationToken);
-
-            if (response is Google.Protobuf.IMessage protoResponse)
-            {
-                return Any.Pack(protoResponse);
-            }
-
-            return null;
+            return channel.PackPayload(response);
         }
     }
 
     private sealed class NotificationHandler<T>(
-        Func<T, NotificationContext, CancellationToken, ValueTask> handler) : INotificationHandler
-        where T : Contracts.IMessage, new()
+        Func<T, NotificationContext, CancellationToken, ValueTask> handler,
+        DuplexChannel channel) : INotificationHandler
     {
         public async ValueTask HandleAsync(Any? payload, NotificationContext context, CancellationToken cancellationToken)
         {
-            var notification = payload?.Unpack<T>() ?? new T();
+            var notification = channel.UnpackPayload<T>(payload);
             await handler(notification, context, cancellationToken);
         }
     }
@@ -519,7 +586,8 @@ public sealed class DuplexChannel(string channelId) : IDuplexChannel
         string CorrelationId,
         TaskCompletionSource<DuplexMessage> Completion,
         Stopwatch Stopwatch,
-        int? TimeoutMs);
+        int? TimeoutMs,
+        Type ResponseType);
 
     private sealed class HandlerRegistration(Action unregister) : IDisposable
     {

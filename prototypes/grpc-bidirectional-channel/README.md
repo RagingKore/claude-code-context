@@ -9,11 +9,77 @@ A modern .NET 10 implementation of a full-duplex gRPC protocol where **both clie
 - **Non-Blocking**: Async handlers with proper cancellation support
 - **Handler Registration**: Fluent API for registering typed request handlers
 - **Fire-and-Forget Notifications**: Support for one-way messages
+- **Dual Payload Support**: Use protobuf messages OR C# records (JSON serialized)
 - **`google.protobuf.Any` Payloads**: Type-safe, AOT-compatible message payloads
 - **RFC 7807 ProblemDetails**: Standardized error responses with detailed problem information
 - **Modern C# Features**: Records, nullable reference types, primary constructors
 - **AOT Compatible**: Native AOT publishing support
 - **Modern Solution Format**: Uses the new `.slnx` XML-based solution file format
+
+## Payload Types
+
+The protocol supports two payload types that can be used interchangeably:
+
+### 1. Protobuf Messages (Direct)
+For maximum performance and type safety, use protobuf messages defined in `.proto` files:
+
+```protobuf
+// messages.proto
+message EchoRequest {
+  string message = 1;
+}
+
+message EchoResponse {
+  string message = 1;
+  int64 timestamp_utc = 2;
+}
+```
+
+```csharp
+// Packed directly into google.protobuf.Any
+var result = await channel.SendRequestAsync<EchoRequest, EchoResponse>(
+    "echo",
+    new EchoRequest { Message = "Hello!" });
+```
+
+### 2. C# Records (JSON Serialized)
+For convenience and rapid prototyping, use regular C# types serialized via JSON:
+
+```csharp
+// Define as C# records
+public sealed record GreetingRequest(string Name, string? Language = null);
+public sealed record GreetingResponse(string Greeting, DateTimeOffset Timestamp);
+
+// Automatically serialized to JSON, wrapped in RawPayload, then packed into Any
+var result = await channel.SendRequestAsync<GreetingRequest, GreetingResponse>(
+    "greet",
+    new GreetingRequest("World", "spanish"));
+```
+
+### How It Works
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  Payload Detection (automatic)                                         │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  Is payload a protobuf IMessage?                                       │
+│    YES → Any.Pack(payload)           ← Direct protobuf, best perf     │
+│    NO  → Serialize to JSON                                             │
+│          → Wrap in RawPayload { data, type_name, content_type }       │
+│          → Any.Pack(rawPayload)      ← Flexible, any C# type          │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+The `RawPayload` wrapper message:
+```protobuf
+message RawPayload {
+  bytes data = 1;           // Serialized payload (e.g., JSON bytes)
+  string type_name = 2;     // "MyNamespace.MyRecord"
+  string content_type = 3;  // "application/json"
+}
+```
 
 ## Architecture
 
@@ -38,14 +104,8 @@ A modern .NET 10 implementation of a full-duplex gRPC protocol where **both clie
 ┌───────────────┐                                 ┌───────────────┐
 │    Server     │  ←───── Request/Response ─────→ │    Client     │
 │               │                                 │               │
-│ Can SEND:     │                                 │ Can SEND:     │
-│ • Requests    │                                 │ • Requests    │
-│ • Responses   │                                 │ • Responses   │
-│ • Notifs      │                                 │ • Notifs      │
-│               │                                 │               │
-│ Can HANDLE:   │                                 │ Can HANDLE:   │
-│ • Requests    │                                 │ • Requests    │
-│ • Notifs      │                                 │ • Notifs      │
+│ Protobuf OR   │                                 │ Protobuf OR   │
+│ C# Records    │                                 │ C# Records    │
 └───────────────┘                                 └───────────────┘
 ```
 
@@ -55,17 +115,18 @@ A modern .NET 10 implementation of a full-duplex gRPC protocol where **both clie
 prototypes/grpc-bidirectional-channel/
 ├── src/
 │   ├── GrpcChannel.Protocol/       # Shared protocol library
-│   │   ├── Contracts/              # IDuplexChannel, DuplexResult, ProblemDetails
+│   │   ├── Contracts/              # IDuplexChannel, IPayloadSerializer
 │   │   ├── Protos/
-│   │   │   ├── channel.proto       # Core DuplexMessage with Any + ProblemDetails
-│   │   │   └── messages.proto      # Sample request/response message types
-│   │   └── DuplexChannel.cs        # Core channel implementation
+│   │   │   ├── channel.proto       # DuplexMessage, RawPayload, ProblemDetails
+│   │   │   └── messages.proto      # Sample protobuf message types
+│   │   ├── DuplexChannel.cs        # Core channel implementation
+│   │   └── JsonPayloadSerializer.cs # Default JSON serializer
 │   ├── GrpcChannel.Server/         # gRPC server implementation
 │   │   ├── Services/               # DuplexServiceImpl, ConnectionRegistry
-│   │   └── Program.cs              # Server with handler registration
+│   │   └── Program.cs              # Server with protobuf + record handlers
 │   └── GrpcChannel.Client/         # gRPC client implementation
 │       ├── DuplexClient.cs         # Client wrapper
-│       └── Program.cs              # Client demo with handlers
+│       └── Program.cs              # Client demo with both payload types
 ├── GrpcChannel.slnx                # Solution file (XML format)
 └── README.md                       # This file
 ```
@@ -106,14 +167,12 @@ dotnet run --project src/GrpcChannel.Client
 
 ### Single Message Format
 
-The protocol uses a single unified `DuplexMessage` type with `google.protobuf.Any` for payloads:
-
 ```protobuf
 message DuplexMessage {
   string id = 1;                    // Unique message ID
   string correlation_id = 2;        // Links responses to requests
   string method = 3;                // Handler method name
-  google.protobuf.Any payload = 4;  // Type-safe protobuf payload
+  google.protobuf.Any payload = 4;  // Protobuf message OR RawPayload wrapper
   StatusCode status = 5;            // Response status
   ProblemDetails problem = 6;       // Error details (RFC 7807)
   int32 timeout_ms = 7;             // Request timeout
@@ -125,8 +184,6 @@ message DuplexMessage {
 
 ### Message Type Inference
 
-Message type is inferred from field presence (no explicit type field needed):
-
 | Type | Has `method` | Has `correlation_id` |
 |------|--------------|---------------------|
 | **Request** | ✓ | ✓ |
@@ -135,11 +192,9 @@ Message type is inferred from field presence (no explicit type field needed):
 
 ### ProblemDetails (RFC 7807)
 
-Error responses include structured problem details:
-
 ```protobuf
 message ProblemDetails {
-  string type = 1;                    // URI reference (e.g., "urn:grpc:duplex:timeout")
+  string type = 1;                    // URI reference
   string title = 2;                   // Human-readable summary
   int32 status = 3;                   // Status code
   string detail = 4;                  // Detailed explanation
@@ -147,217 +202,124 @@ message ProblemDetails {
   string code = 6;                    // Application error code
   string trace = 7;                   // Stack trace (debug only)
   map<string, string> extensions = 8; // Additional properties
-  repeated ProblemDetails errors = 9; // Nested errors (for chains)
+  repeated ProblemDetails errors = 9; // Nested errors
 }
 ```
-
-### Status Codes
-
-| Status | Code | Description |
-|--------|------|-------------|
-| `Ok` | 1 | Request completed successfully |
-| `Error` | 2 | General error occurred |
-| `NotFound` | 3 | Method/handler not found |
-| `Timeout` | 4 | Request timed out |
-| `Cancelled` | 5 | Request was cancelled |
-| `Unauthorized` | 6 | Not authorized |
-| `InvalidRequest` | 7 | Request was malformed |
-| `Unavailable` | 8 | Service unavailable |
-| `Internal` | 9 | Internal error |
 
 ## Code Examples
 
-### Client: Sending Requests to Server
+### Protobuf Messages
 
 ```csharp
-await using var client = new DuplexClient(options);
-await client.ConnectAsync();
+// Server handler (protobuf)
+channel.OnRequest<EchoRequest, EchoResponse>("echo", async (req, ctx, ct) =>
+{
+    return new EchoResponse
+    {
+        Message = req.Message,
+        TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+    };
+});
 
-// Send typed request, await typed response
-var result = await client.Channel.SendRequestAsync<EchoRequest, EchoResponse>(
+// Client call (protobuf)
+var result = await channel.SendRequestAsync<EchoRequest, EchoResponse>(
     "echo",
     new EchoRequest { Message = "Hello!" });
-
-if (result.IsSuccess)
-{
-    Console.WriteLine($"Echo: {result.Value!.Message}");
-    Console.WriteLine($"RTT: {result.DurationMs}ms");
-}
-else
-{
-    // Access RFC 7807 problem details
-    Console.WriteLine($"Error: {result.Problem?.Detail}");
-    Console.WriteLine($"Code: {result.Problem?.Code}");
-}
-
-// With timeout
-var mathResult = await client.Channel.SendRequestAsync<MathRequest, MathResponse>(
-    "math",
-    new MathRequest { Operation = "multiply", A = 6, B = 7 },
-    timeoutMs: 5000);
 ```
 
-### Client: Registering Handlers (Server → Client)
+### C# Records (JSON)
 
 ```csharp
-// Server can now call methods on the client!
-client.Channel.OnRequest<GetClientInfoRequest, ClientInfoResponse>(
-    "client.info",
-    async (request, ctx, ct) =>
-    {
-        return new ClientInfoResponse
-        {
-            MachineName = Environment.MachineName,
-            ProcessId = Environment.ProcessId,
-            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-        };
-    });
+// Define records
+public sealed record GreetingRequest(string Name, string? Language = null);
+public sealed record GreetingResponse(string Greeting, DateTimeOffset Timestamp);
 
-// Handle notifications
-client.Channel.OnNotification<BroadcastNotification>(
-    "broadcast",
-    async (notification, ctx, ct) =>
+// Server handler (JSON)
+channel.OnRequest<GreetingRequest, GreetingResponse>("greet", async (req, ctx, ct) =>
+{
+    var greeting = req.Language switch
     {
-        Console.WriteLine($"Broadcast: {notification.Message}");
-    });
+        "spanish" => $"¡Hola, {req.Name}!",
+        "french" => $"Bonjour, {req.Name}!",
+        _ => $"Hello, {req.Name}!"
+    };
+    return new GreetingResponse(greeting, DateTimeOffset.UtcNow);
+});
+
+// Client call (JSON)
+var result = await channel.SendRequestAsync<GreetingRequest, GreetingResponse>(
+    "greet",
+    new GreetingRequest("World", "spanish"));
+
+Console.WriteLine(result.Value!.Greeting); // "¡Hola, World!"
 ```
 
-### Server: Registering Handlers (Client → Server)
+### Complex Nested Records
 
 ```csharp
-registry.OnAllChannels(channel =>
-{
-    channel.OnRequest<EchoRequest, EchoResponse>("echo", async (req, ctx, ct) =>
-    {
-        return new EchoResponse
-        {
-            Message = req.Message,
-            TimestampUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-        };
-    });
+// Nested record types
+public sealed record ProcessDataRequest(List<string> Items);
+public sealed record ProcessDataResponse(
+    List<ProcessedItem> Results,
+    int TotalProcessed,
+    DateTimeOffset ProcessedAt);
+public sealed record ProcessedItem(
+    int Id,
+    string OriginalValue,
+    string ProcessedValue,
+    int Length);
 
-    channel.OnRequest<MathRequest, MathResponse>("math", async (req, ctx, ct) =>
-    {
-        var result = req.Operation switch
-        {
-            "add" => req.A + req.B,
-            "multiply" => req.A * req.B,
-            _ => double.NaN
-        };
-        return new MathResponse { Result = result, Operation = req.Operation };
-    });
+// Handler with complex types
+channel.OnRequest<ProcessDataRequest, ProcessDataResponse>("process", async (req, ctx, ct) =>
+{
+    var results = req.Items
+        .Select((item, i) => new ProcessedItem(i + 1, item, item.ToUpper(), item.Length))
+        .ToList();
+
+    return new ProcessDataResponse(results, results.Count, DateTimeOffset.UtcNow);
 });
 ```
 
-### Server: Sending Requests to Client
+### Custom Serializer
 
 ```csharp
-// Get a specific client channel
-var clientChannel = registry.GetChannelByClientId("client-123");
-
-// Server initiates request to client
-var result = await clientChannel!.SendRequestAsync<GetClientInfoRequest, ClientInfoResponse>(
-    "client.info",
-    new GetClientInfoRequest());
-
-if (result.IsSuccess)
+// Implement custom serializer
+public class MessagePackSerializer : IPayloadSerializer
 {
-    Console.WriteLine($"Client machine: {result.Value!.MachineName}");
-}
-```
+    public string ContentType => "application/x-msgpack";
 
-### Fire-and-Forget Notifications
-
-```csharp
-// Send notification (no response)
-await channel.SendNotificationAsync("client.event",
-    new ClientEventNotification
-    {
-        EventType = "startup",
-        Data = "Ready"
-    });
-
-// Broadcast to all clients
-foreach (var client in registry.GetAllChannels())
-{
-    await client.Channel.SendNotificationAsync("broadcast",
-        new BroadcastNotification { Message = "Hello all!" });
-}
-```
-
-## How Correlation Works
-
-```
-Client                                Server
-  │                                     │
-  │──── DuplexMessage ─────────────────▶│
-  │     id: "msg-456"                  │
-  │     correlation_id: "abc123"       │
-  │     method: "echo"                 │
-  │     payload: Any<EchoRequest>      │
-  │                                     │
-  │     [Client stores pending          │
-  │      request with "abc123"]         │
-  │                                     │
-  │                                     │──── Handler invoked
-  │                                     │     for "echo" method
-  │                                     │     Unpacks Any<EchoRequest>
-  │                                     │
-  │◀──── DuplexMessage ────────────────│
-  │      id: "msg-789"                  │
-  │      correlation_id: "abc123"       │
-  │      status: OK                     │
-  │      payload: Any<EchoResponse>     │
-  │                                     │
-  │     [Client matches "abc123"        │
-  │      completes awaiting Task]       │
-  │                                     │
-```
-
-## Modern C# Features Used
-
-### Protobuf Messages with `google.protobuf.Any`
-
-```protobuf
-// messages.proto - Sample message definitions
-message EchoRequest {
-  string message = 1;
+    public byte[] Serialize<T>(T value) => MessagePackSerializer.Serialize(value);
+    public T Deserialize<T>(byte[] data) => MessagePackSerializer.Deserialize<T>(data);
+    public object Deserialize(byte[] data, Type type) => MessagePackSerializer.Deserialize(type, data);
 }
 
-message EchoResponse {
-  string message = 1;
-  int64 timestamp_utc = 2;
-}
+// Use with client
+var client = new DuplexClient(options, new MessagePackSerializer());
 
-message MathRequest {
-  string operation = 1;
-  double a = 2;
-  double b = 3;
-}
+// Use with server (via DI)
+services.AddSingleton<IPayloadSerializer, MessagePackSerializer>();
 ```
 
-### Primary Constructors
+## Built-in Methods
 
-```csharp
-public sealed class DuplexClient(
-    DuplexClientOptions options,
-    ILogger<DuplexClient>? logger = null) : IAsyncDisposable
-{
-    // Fields available directly from constructor parameters
-}
-```
+### Protobuf Methods
+| Method | Request | Response | Description |
+|--------|---------|----------|-------------|
+| `ping` | `PingRequest` | `PongResponse` | Health check |
+| `echo` | `EchoRequest` | `EchoResponse` | Echo message |
+| `status` | `StatusRequest` | `StatusResponse` | Server status |
+| `math` | `MathRequest` | `MathResponse` | Math operations |
+| `delay` | `DelayRequest` | `DelayResponse` | Delay for testing |
+| `broadcast` | `BroadcastRequest` | `BroadcastResponse` | Broadcast to clients |
 
-### Handler Registration with Lambdas
+### C# Record Methods
+| Method | Request | Response | Description |
+|--------|---------|----------|-------------|
+| `greet` | `GreetingRequest` | `GreetingResponse` | Localized greeting |
+| `process` | `ProcessDataRequest` | `ProcessDataResponse` | Data processing |
+| `user.get` | `GetUserRequest` | `UserInfo` | Get user info |
 
-```csharp
-channel.OnRequest<TRequest, TResponse>("method", async (request, context, ct) =>
-{
-    // Non-blocking async handler
-    return new TResponse { /* ... */ };
-});
-```
-
-### Result Types with ProblemDetails
+## Error Handling
 
 ```csharp
 var result = await channel.SendRequestAsync<Req, Res>("method", request);
@@ -379,17 +341,6 @@ else
 var value = result.GetValueOrThrow();  // Throws DuplexException
 ```
 
-## Built-in Server Methods
-
-| Method | Request | Response | Description |
-|--------|---------|----------|-------------|
-| `ping` | `PingRequest` | `PongResponse` | Health check |
-| `echo` | `EchoRequest` | `EchoResponse` | Echo message back |
-| `status` | `StatusRequest` | `StatusResponse` | Server status |
-| `math` | `MathRequest` | `MathResponse` | Math operations |
-| `delay` | `DelayRequest` | `DelayResponse` | Delay for testing |
-| `broadcast` | `BroadcastRequest` | `BroadcastResponse` | Broadcast to clients |
-
 ## AOT Publishing
 
 Both server and client support Native AOT:
@@ -400,6 +351,17 @@ dotnet publish src/GrpcChannel.Server -c Release -r linux-x64
 
 # Publish client as native binary
 dotnet publish src/GrpcChannel.Client -c Release -r linux-x64
+```
+
+For full AOT support with JSON serialization, use source generators:
+
+```csharp
+[JsonSerializable(typeof(GreetingRequest))]
+[JsonSerializable(typeof(GreetingResponse))]
+public partial class AppJsonContext : JsonSerializerContext { }
+
+var serializer = new JsonPayloadSerializer(AppJsonContext.Default);
+var client = new DuplexClient(options, serializer);
 ```
 
 ## License

@@ -92,6 +92,19 @@ message ProblemDetails {
   repeated ProblemDetails errors = 9;
 }
 
+// Wrapper for arbitrary serialized payloads (non-protobuf types)
+// Used when sending C# records, POCOs, or other serializable types
+message RawPayload {
+  // Serialized payload data
+  bytes data = 1;
+
+  // Fully qualified type name (e.g., "MyNamespace.MyRecord")
+  string type_name = 2;
+
+  // Content type / media type (e.g., "application/json", "application/x-msgpack")
+  string content_type = 3;
+}
+
 // Response status codes
 enum StatusCode {
   STATUS_CODE_UNSPECIFIED = 0;
