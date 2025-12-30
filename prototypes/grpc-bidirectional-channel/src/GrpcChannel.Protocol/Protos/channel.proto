@@ -10,16 +10,16 @@ package channel;
 // Both client and server can send requests and receive correlated responses
 service DuplexService {
   // Single bidirectional stream for all communication
-  rpc Open(stream DuplexMessage) returns (stream DuplexMessage);
+  rpc Open(stream ProtocolDataUnit) returns (stream ProtocolDataUnit);
 }
 
-// Unified message envelope for bidirectional communication
+// Protocol Data Unit (PDU) - unified message envelope for bidirectional communication
 //
 // Message type inference:
 // - Request:      method is set, correlation_id is set
 // - Response:     method is empty, correlation_id matches a pending request
 // - Notification: method is set, correlation_id is empty
-message DuplexMessage {
+message ProtocolDataUnit {
   // Unique message identifier
   string id = 1;
 

@@ -117,7 +117,7 @@ prototypes/grpc-bidirectional-channel/
 │   ├── GrpcChannel.Protocol/       # Shared protocol library
 │   │   ├── Contracts/              # IDuplexChannel, IPayloadSerializer
 │   │   ├── Protos/
-│   │   │   ├── channel.proto       # DuplexMessage, RawPayload, ProblemDetails
+│   │   │   ├── channel.proto       # ProtocolDataUnit, RawPayload, ProblemDetails
 │   │   │   └── messages.proto      # Sample protobuf message types
 │   │   ├── DuplexChannel.cs        # Core channel implementation
 │   │   └── JsonPayloadSerializer.cs # Default JSON serializer
@@ -168,7 +168,7 @@ dotnet run --project src/GrpcChannel.Client
 ### Single Message Format
 
 ```protobuf
-message DuplexMessage {
+message ProtocolDataUnit {
   string id = 1;                    // Unique message ID
   string correlation_id = 2;        // Links responses to requests
   string method = 3;                // Handler method name

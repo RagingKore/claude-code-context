@@ -25,8 +25,8 @@ public sealed class DuplexServiceImpl(
     /// Opens a bidirectional duplex channel.
     /// </summary>
     public override async Task Open(
-        IAsyncStreamReader<DuplexMessage> requestStream,
-        IServerStreamWriter<DuplexMessage> responseStream,
+        IAsyncStreamReader<ProtocolDataUnit> requestStream,
+        IServerStreamWriter<ProtocolDataUnit> responseStream,
         ServerCallContext context)
     {
         var channelId = Guid.NewGuid().ToString("N");

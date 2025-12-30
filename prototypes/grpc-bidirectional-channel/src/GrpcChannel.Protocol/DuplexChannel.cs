@@ -27,7 +27,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
     private readonly ConcurrentDictionary<string, INotificationHandler> _notificationHandlers = new();
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
-    private Func<DuplexMessage, CancellationToken, ValueTask>? _sendFunc;
+    private Func<ProtocolDataUnit, CancellationToken, ValueTask>? _sendFunc;
     private ChannelState _state = ChannelState.Disconnected;
     private string? _remoteId;
     private bool _includeStackTrace;
@@ -42,7 +42,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
     /// Called by transport layer (gRPC streaming).
     /// </summary>
     public void AttachSender(
-        Func<DuplexMessage, CancellationToken, ValueTask> sendFunc,
+        Func<ProtocolDataUnit, CancellationToken, ValueTask> sendFunc,
         string? remoteId = null,
         bool includeStackTrace = false)
     {
@@ -55,7 +55,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
     /// <summary>
     /// Processes an incoming message from the transport layer.
     /// </summary>
-    public async ValueTask ProcessIncomingAsync(DuplexMessage message, CancellationToken cancellationToken = default)
+    public async ValueTask ProcessIncomingAsync(ProtocolDataUnit message, CancellationToken cancellationToken = default)
     {
         // Determine message type based on fields:
         // - Response: has correlation_id, no method (response to a request)
@@ -92,7 +92,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
         EnsureConnected();
 
         var correlationId = Guid.NewGuid().ToString("N");
-        var tcs = new TaskCompletionSource<DuplexMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = new TaskCompletionSource<ProtocolDataUnit>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pending = new PendingRequest(correlationId, tcs, Stopwatch.StartNew(), timeoutMs, typeof(TResponse));
 
         if (!_pendingRequests.TryAdd(correlationId, pending))
@@ -102,7 +102,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
 
         try
         {
-            var message = new DuplexMessage
+            var message = new ProtocolDataUnit
             {
                 Id = Guid.NewGuid().ToString("N"),
                 CorrelationId = correlationId,
@@ -190,7 +190,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
     {
         EnsureConnected();
 
-        var message = new DuplexMessage
+        var message = new ProtocolDataUnit
         {
             Id = Guid.NewGuid().ToString("N"),
             Method = topic, // For notifications, method is the topic
@@ -351,11 +351,11 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
             $"Cannot unpack payload of type '{any.TypeUrl}' as '{targetType.Name}'.");
     }
 
-    private async ValueTask HandleIncomingRequestAsync(DuplexMessage message, CancellationToken cancellationToken)
+    private async ValueTask HandleIncomingRequestAsync(ProtocolDataUnit message, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
 
-        DuplexMessage response;
+        ProtocolDataUnit response;
 
         if (_requestHandlers.TryGetValue(message.Method, out var handler))
         {
@@ -370,7 +370,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
                 var responsePayload = await handler.HandleAsync(message.Payload, context, cancellationToken);
                 stopwatch.Stop();
 
-                response = new DuplexMessage
+                response = new ProtocolDataUnit
                 {
                     Id = Guid.NewGuid().ToString("N"),
                     CorrelationId = message.CorrelationId,
@@ -385,7 +385,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
             {
                 stopwatch.Stop();
 
-                response = new DuplexMessage
+                response = new ProtocolDataUnit
                 {
                     Id = Guid.NewGuid().ToString("N"),
                     CorrelationId = message.CorrelationId,
@@ -400,7 +400,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
         {
             stopwatch.Stop();
 
-            response = new DuplexMessage
+            response = new ProtocolDataUnit
             {
                 Id = Guid.NewGuid().ToString("N"),
                 CorrelationId = message.CorrelationId,
@@ -421,7 +421,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
         await SendMessageAsync(response, cancellationToken);
     }
 
-    private void HandleIncomingResponse(DuplexMessage message)
+    private void HandleIncomingResponse(ProtocolDataUnit message)
     {
         if (_pendingRequests.TryRemove(message.CorrelationId, out var pending))
         {
@@ -429,7 +429,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
         }
     }
 
-    private async ValueTask HandleIncomingNotificationAsync(DuplexMessage message, CancellationToken cancellationToken)
+    private async ValueTask HandleIncomingNotificationAsync(ProtocolDataUnit message, CancellationToken cancellationToken)
     {
         if (_notificationHandlers.TryGetValue(message.Method, out var handler))
         {
@@ -449,7 +449,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
         }
     }
 
-    private async ValueTask SendMessageAsync(DuplexMessage message, CancellationToken cancellationToken)
+    private async ValueTask SendMessageAsync(ProtocolDataUnit message, CancellationToken cancellationToken)
     {
         if (_sendFunc is null)
         {
@@ -584,7 +584,7 @@ public sealed class DuplexChannel(string channelId, IPayloadSerializer? serializ
 
     private sealed record PendingRequest(
         string CorrelationId,
-        TaskCompletionSource<DuplexMessage> Completion,
+        TaskCompletionSource<ProtocolDataUnit> Completion,
         Stopwatch Stopwatch,
         int? TimeoutMs,
         Type ResponseType);

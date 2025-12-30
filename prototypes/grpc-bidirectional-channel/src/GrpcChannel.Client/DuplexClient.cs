@@ -22,7 +22,7 @@ public sealed class DuplexClient(
 {
     private GrpcChannel? _grpcChannel;
     private DuplexService.DuplexServiceClient? _client;
-    private AsyncDuplexStreamingCall<DuplexMessage, DuplexMessage>? _streamingCall;
+    private AsyncDuplexStreamingCall<ProtocolDataUnit, ProtocolDataUnit>? _streamingCall;
     private DuplexChannel? _duplexChannel;
     private CancellationTokenSource? _connectionCts;
     private Task? _receiveTask;
