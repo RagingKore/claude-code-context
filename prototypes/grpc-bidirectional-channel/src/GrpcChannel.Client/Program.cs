@@ -12,13 +12,13 @@ using var loggerFactory = LoggerFactory.Create(builder =>
 
 var logger = loggerFactory.CreateLogger<Program>();
 
-Console.WriteLine("=== gRPC Duplex Channel Client Demo ===\n");
+Console.WriteLine("=== gRPC Protocol Client Demo ===\n");
 
-// Create client (uses JSON serializer by default for C# record types)
-var options = DuplexClientOptions.ForLocalDevelopment();
-var clientLogger = loggerFactory.CreateLogger<DuplexClient>();
+// Create unified protocol client (handles both RPC and data streams)
+var options = ProtocolClientOptions.ForLocalDevelopment();
+var clientLogger = loggerFactory.CreateLogger<ProtocolClient>();
 
-await using var client = new DuplexClient(options, logger: clientLogger);
+await using var client = new ProtocolClient(options, logger: clientLogger);
 
 try
 {
@@ -39,8 +39,8 @@ try
     // Demo: Notifications
     await DemoNotifications(client.Channel, logger);
 
-    // Demo: High-throughput data streams
-    await DemoDataStreams(options, loggerFactory, logger);
+    // Demo: High-throughput data streams (uses same client)
+    await DemoDataStreams(client, logger);
 
     // Keep running to receive server requests
     Console.WriteLine("\n--- Listening for server requests (press Enter to exit) ---");
@@ -276,22 +276,18 @@ static async Task DemoNotifications(IDuplexChannel channel, ILogger logger)
     Console.WriteLine("JSON notification sent");
 }
 
-static async Task DemoDataStreams(DuplexClientOptions options, ILoggerFactory loggerFactory, ILogger logger)
+static async Task DemoDataStreams(ProtocolClient client, ILogger logger)
 {
     Console.WriteLine("\n=== HIGH-THROUGHPUT DATA STREAMS ===\n");
-
-    // Create a separate data stream client
-    var streamLogger = loggerFactory.CreateLogger<DataStreamClient>();
-    await using var streamClient = new DataStreamClient(options, logger: streamLogger);
 
     // 1. Batch stream - finite stream that completes
     Console.WriteLine("1. Batch Stream (finite, 10 items):");
     var batchOptions = new Dictionary<string, string> { ["batch_size"] = "10" };
     var batchCount = 0;
 
-    await foreach (var item in streamClient.SubscribeAsync<BatchItem>(
+    await foreach (var item in client.SubscribeAsync<BatchItem>(
         "batch",
-        options: batchOptions))
+        streamOptions: batchOptions))
     {
         batchCount++;
         Console.WriteLine($"   [{item.Sequence}] {item.Payload?.Name} = {item.Payload?.Value}");
@@ -305,7 +301,7 @@ static async Task DemoDataStreams(DuplexClientOptions options, ILoggerFactory lo
 
     try
     {
-        await foreach (var item in streamClient.SubscribeAsync<CounterEvent>(
+        await foreach (var item in client.SubscribeAsync<CounterEvent>(
             "counter",
             maxRate: 10,
             cancellationToken: counterCts.Token))
@@ -331,7 +327,7 @@ static async Task DemoDataStreams(DuplexClientOptions options, ILoggerFactory lo
 
     try
     {
-        await foreach (var item in streamClient.SubscribeAsync<StreamEvent>(
+        await foreach (var item in client.SubscribeAsync<StreamEvent>(
             "events",
             filter: "user",
             cancellationToken: eventsCts.Token))

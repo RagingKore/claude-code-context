@@ -186,11 +186,16 @@ dataStreamRegistry.Register("batch", async (context, writer, ct) =>
 ### Client: Subscribing to Data Streams
 
 ```csharp
-// Create a data stream client (separate from duplex client)
-await using var streamClient = new DataStreamClient(options);
+// Use the same ProtocolClient for both RPC and data streams
+await using var client = new ProtocolClient(options);
+await client.ConnectAsync();
 
-// Subscribe with async enumerable
-await foreach (var item in streamClient.SubscribeAsync<CounterEvent>(
+// RPC request
+var result = await client.Channel.SendRequestAsync<EchoRequest, EchoResponse>(
+    "echo", new EchoRequest { Message = "Hello!" });
+
+// Subscribe to data stream with async enumerable
+await foreach (var item in client.SubscribeAsync<CounterEvent>(
     topic: "counter",
     maxRate: 100,  // max 100 messages/sec
     cancellationToken: ct))
@@ -199,7 +204,7 @@ await foreach (var item in streamClient.SubscribeAsync<CounterEvent>(
 }
 
 // Subscribe with filtering
-await foreach (var item in streamClient.SubscribeAsync<StreamEvent>(
+await foreach (var item in client.SubscribeAsync<StreamEvent>(
     topic: "events",
     filter: "user",  // only user.* events
     cancellationToken: ct))
@@ -209,16 +214,16 @@ await foreach (var item in streamClient.SubscribeAsync<StreamEvent>(
 
 // Subscribe to finite batch
 var batchOptions = new Dictionary<string, string> { ["batch_size"] = "50" };
-await foreach (var item in streamClient.SubscribeAsync<BatchItem>(
+await foreach (var item in client.SubscribeAsync<BatchItem>(
     topic: "batch",
-    options: batchOptions))
+    streamOptions: batchOptions))
 {
     Console.WriteLine($"{item.Payload?.Name} = {item.Payload?.Value}");
 }
 // Loop ends when stream completes
 
 // Callback-based subscription
-await streamClient.SubscribeAsync<StreamEvent>(
+await client.SubscribeAsync<StreamEvent>(
     topic: "events",
     onMessage: async (item, ct) =>
     {
@@ -278,8 +283,7 @@ prototypes/grpc-bidirectional-channel/
 │   │   ├── Services/               # DuplexServiceImpl, DataStreamRegistry
 │   │   └── Program.cs              # Server with RPC + stream handlers
 │   └── GrpcChannel.Client/         # gRPC client implementation
-│       ├── DuplexClient.cs         # RPC client wrapper
-│       ├── DataStreamClient.cs     # High-throughput stream client
+│       ├── ProtocolClient.cs       # Unified client (RPC + data streams)
 │       └── Program.cs              # Demo with RPC + data streams
 ├── GrpcChannel.slnx                # Solution file (XML format)
 └── README.md                       # This file
@@ -448,7 +452,7 @@ public class MessagePackSerializer : IPayloadSerializer
 }
 
 // Use with client
-var client = new DuplexClient(options, new MessagePackSerializer());
+var client = new ProtocolClient(options, new MessagePackSerializer());
 
 // Use with server (via DI)
 services.AddSingleton<IPayloadSerializer, MessagePackSerializer>();
@@ -515,7 +519,7 @@ For full AOT support with JSON serialization, use source generators:
 public partial class AppJsonContext : JsonSerializerContext { }
 
 var serializer = new JsonPayloadSerializer(AppJsonContext.Default);
-var client = new DuplexClient(options, serializer);
+var client = new ProtocolClient(options, serializer);
 ```
 
 ## License
