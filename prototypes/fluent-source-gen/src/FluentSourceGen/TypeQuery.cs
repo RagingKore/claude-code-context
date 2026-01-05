@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -12,33 +13,88 @@ public sealed class TypeQuery
     readonly IncrementalGeneratorInitializationContext _context;
     readonly List<Func<SyntaxNode, bool>> _syntaxPredicates = [];
     readonly List<Func<INamedTypeSymbol, bool>> _semanticPredicates = [];
+    readonly List<string> _attributePatterns = [];
+    readonly List<string> _interfacePatterns = [];
+    readonly List<string> _excludedAttributePatterns = [];
+    readonly List<string> _excludedInterfacePatterns = [];
 
-    string? _attributeFullName;
-    string? _interfaceFullName;
-    TypeFilter _typeFilter = TypeFilter.None;
+    bool _negateNext;
+    bool _requireAllAttributes;
+    bool _requireAllInterfaces;
 
     internal TypeQuery(IncrementalGeneratorInitializationContext context)
     {
         _context = context;
     }
 
+    #region Negation Modifier
+
+    /// <summary>
+    /// Negates the next filter condition.
+    /// </summary>
+    public TypeQuery Not
+    {
+        get
+        {
+            _negateNext = true;
+            return this;
+        }
+    }
+
+    void ApplyPredicate(Func<INamedTypeSymbol, bool> predicate)
+    {
+        if (_negateNext)
+        {
+            _semanticPredicates.Add(t => !predicate(t));
+            _negateNext = false;
+        }
+        else
+        {
+            _semanticPredicates.Add(predicate);
+        }
+    }
+
+    void ApplySyntaxPredicate(Func<SyntaxNode, bool> predicate)
+    {
+        if (_negateNext)
+        {
+            _syntaxPredicates.Add(n => !predicate(n));
+            _negateNext = false;
+        }
+        else
+        {
+            _syntaxPredicates.Add(predicate);
+        }
+    }
+
+    #endregion
+
     #region Type Kind Filters
 
     /// <summary>
-    /// Filter to only class types.
+    /// Filter by type kind using flags enum.
     /// </summary>
-    public TypeQuery ThatAreClasses()
+    public TypeQuery OfKind(TypeKind kind)
     {
-        _typeFilter |= TypeFilter.Class;
+        ApplyPredicate(t => MatchesTypeKind(t, kind));
         return this;
     }
 
     /// <summary>
-    /// Filter to only struct types.
+    /// Filter to only class types (non-record).
+    /// </summary>
+    public TypeQuery ThatAreClasses()
+    {
+        ApplyPredicate(t => t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Class && !t.IsRecord);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to only struct types (non-record).
     /// </summary>
     public TypeQuery ThatAreStructs()
     {
-        _typeFilter |= TypeFilter.Struct;
+        ApplyPredicate(t => t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Struct && !t.IsRecord);
         return this;
     }
 
@@ -47,7 +103,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreRecords()
     {
-        _typeFilter |= TypeFilter.AnyRecord;
+        ApplyPredicate(t => t.IsRecord);
         return this;
     }
 
@@ -56,7 +112,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreRecordClasses()
     {
-        _typeFilter |= TypeFilter.Record;
+        ApplyPredicate(t => t.IsRecord && t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Class);
         return this;
     }
 
@@ -65,7 +121,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreRecordStructs()
     {
-        _typeFilter |= TypeFilter.RecordStruct;
+        ApplyPredicate(t => t.IsRecord && t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Struct);
         return this;
     }
 
@@ -74,7 +130,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreInterfaces()
     {
-        _typeFilter |= TypeFilter.Interface;
+        ApplyPredicate(t => t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Interface);
         return this;
     }
 
@@ -83,7 +139,34 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreEnums()
     {
-        _typeFilter |= TypeFilter.Enum;
+        ApplyPredicate(t => t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Enum);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to only delegate types.
+    /// </summary>
+    public TypeQuery ThatAreDelegates()
+    {
+        ApplyPredicate(t => t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Delegate);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to reference types only.
+    /// </summary>
+    public TypeQuery ThatAreReferenceTypes()
+    {
+        ApplyPredicate(t => t.IsReferenceType);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to value types only.
+    /// </summary>
+    public TypeQuery ThatAreValueTypes()
+    {
+        ApplyPredicate(t => t.IsValueType);
         return this;
     }
 
@@ -92,12 +175,20 @@ public sealed class TypeQuery
     #region Modifier Filters
 
     /// <summary>
+    /// Filter by modifiers using flags enum.
+    /// </summary>
+    public TypeQuery WithModifiers(TypeModifiers modifiers)
+    {
+        ApplyPredicate(t => MatchesModifiers(t, modifiers));
+        return this;
+    }
+
+    /// <summary>
     /// Filter to only partial types.
     /// </summary>
     public TypeQuery ThatArePartial()
     {
-        _typeFilter |= TypeFilter.Partial;
-        _syntaxPredicates.Add(static node =>
+        ApplySyntaxPredicate(node =>
             node is TypeDeclarationSyntax tds &&
             tds.Modifiers.Any(m => m.IsKind(SyntaxKind.PartialKeyword)));
         return this;
@@ -108,8 +199,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreStatic()
     {
-        _typeFilter |= TypeFilter.Static;
-        _semanticPredicates.Add(static t => t.IsStatic);
+        ApplyPredicate(t => t.IsStatic);
         return this;
     }
 
@@ -118,8 +208,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreAbstract()
     {
-        _typeFilter |= TypeFilter.Abstract;
-        _semanticPredicates.Add(static t => t.IsAbstract);
+        ApplyPredicate(t => t.IsAbstract && !t.TypeKind.Equals(Microsoft.CodeAnalysis.TypeKind.Interface));
         return this;
     }
 
@@ -128,22 +217,56 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreSealed()
     {
-        _typeFilter |= TypeFilter.Sealed;
-        _semanticPredicates.Add(static t => t.IsSealed);
+        ApplyPredicate(t => t.IsSealed);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to only readonly struct types.
+    /// </summary>
+    public TypeQuery ThatAreReadonly()
+    {
+        ApplyPredicate(t => t.IsReadOnly);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to only ref struct types.
+    /// </summary>
+    public TypeQuery ThatAreRefStructs()
+    {
+        ApplyPredicate(t => t.IsRefLikeType);
         return this;
     }
 
     #endregion
 
-    #region Visibility Filters
+    #region Accessibility Filters
+
+    /// <summary>
+    /// Filter by accessibility using flags enum.
+    /// </summary>
+    public TypeQuery WithAccessibility(TypeAccessibility accessibility)
+    {
+        ApplyPredicate(t => MatchesAccessibility(t, accessibility));
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types with specified accessibility.
+    /// </summary>
+    public TypeQuery WithoutAccessibility(TypeAccessibility accessibility)
+    {
+        ApplyPredicate(t => !MatchesAccessibility(t, accessibility));
+        return this;
+    }
 
     /// <summary>
     /// Filter to only public types.
     /// </summary>
     public TypeQuery ThatArePublic()
     {
-        _typeFilter |= TypeFilter.Public;
-        _semanticPredicates.Add(static t => t.DeclaredAccessibility == Accessibility.Public);
+        ApplyPredicate(t => t.DeclaredAccessibility == Accessibility.Public);
         return this;
     }
 
@@ -152,8 +275,310 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery ThatAreInternal()
     {
-        _typeFilter |= TypeFilter.Internal;
-        _semanticPredicates.Add(static t => t.DeclaredAccessibility == Accessibility.Internal);
+        ApplyPredicate(t => t.DeclaredAccessibility == Accessibility.Internal);
+        return this;
+    }
+
+    #endregion
+
+    #region Base Type / Inheritance Filters
+
+    /// <summary>
+    /// Filter to types derived from the specified base type (direct or transitive).
+    /// </summary>
+    public TypeQuery DerivedFrom(string baseTypeFullName)
+    {
+        var pattern = NormalizeTypeName(baseTypeFullName);
+        ApplyPredicate(t => IsDerivedFrom(t, pattern, transitive: true));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types derived from the specified base type.
+    /// </summary>
+    public TypeQuery DerivedFrom<TBase>()
+    {
+        return DerivedFrom(typeof(TBase).FullName!);
+    }
+
+    /// <summary>
+    /// Filter to types directly derived from the specified base type (not transitive).
+    /// </summary>
+    public TypeQuery DirectlyDerivedFrom(string baseTypeFullName)
+    {
+        var pattern = NormalizeTypeName(baseTypeFullName);
+        ApplyPredicate(t => IsDerivedFrom(t, pattern, transitive: false));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types directly derived from the specified base type.
+    /// </summary>
+    public TypeQuery DirectlyDerivedFrom<TBase>()
+    {
+        return DirectlyDerivedFrom(typeof(TBase).FullName!);
+    }
+
+    /// <summary>
+    /// Exclude types derived from the specified base type.
+    /// </summary>
+    public TypeQuery NotDerivedFrom(string baseTypeFullName)
+    {
+        var pattern = NormalizeTypeName(baseTypeFullName);
+        ApplyPredicate(t => !IsDerivedFrom(t, pattern, transitive: true));
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types derived from the specified base type.
+    /// </summary>
+    public TypeQuery NotDerivedFrom<TBase>()
+    {
+        return NotDerivedFrom(typeof(TBase).FullName!);
+    }
+
+    #endregion
+
+    #region Member Filters
+
+    /// <summary>
+    /// Filter to types that have any members.
+    /// </summary>
+    public TypeQuery WithMembers()
+    {
+        ApplyPredicate(t => t.GetMembers().Any(m => !m.IsImplicitlyDeclared));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have any methods.
+    /// </summary>
+    public TypeQuery WithMethods()
+    {
+        ApplyPredicate(t => t.GetMembers().OfType<IMethodSymbol>()
+            .Any(m => m.MethodKind == MethodKind.Ordinary && !m.IsImplicitlyDeclared));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a method with the specified name.
+    /// </summary>
+    public TypeQuery WithMethod(string methodName)
+    {
+        ApplyPredicate(t => t.GetMembers(methodName).OfType<IMethodSymbol>()
+            .Any(m => m.MethodKind == MethodKind.Ordinary));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a method matching the predicate.
+    /// </summary>
+    public TypeQuery WithMethodMatching(Func<IMethodSymbol, bool> predicate)
+    {
+        ApplyPredicate(t => t.GetMembers().OfType<IMethodSymbol>()
+            .Where(m => m.MethodKind == MethodKind.Ordinary && !m.IsImplicitlyDeclared)
+            .Any(predicate));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have any properties.
+    /// </summary>
+    public TypeQuery WithProperties()
+    {
+        ApplyPredicate(t => t.GetMembers().OfType<IPropertySymbol>()
+            .Any(p => !p.IsImplicitlyDeclared));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a property with the specified name.
+    /// </summary>
+    public TypeQuery WithProperty(string propertyName)
+    {
+        ApplyPredicate(t => t.GetMembers(propertyName).OfType<IPropertySymbol>().Any());
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a property matching the predicate.
+    /// </summary>
+    public TypeQuery WithPropertyMatching(Func<IPropertySymbol, bool> predicate)
+    {
+        ApplyPredicate(t => t.GetMembers().OfType<IPropertySymbol>()
+            .Where(p => !p.IsImplicitlyDeclared)
+            .Any(predicate));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a property of the specified type.
+    /// </summary>
+    public TypeQuery WithPropertyOfType(string typeFullName)
+    {
+        var pattern = NormalizeTypeName(typeFullName);
+        ApplyPredicate(t => t.GetMembers().OfType<IPropertySymbol>()
+            .Any(p => MatchesTypeName(p.Type.ToDisplayString(), pattern)));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have any fields.
+    /// </summary>
+    public TypeQuery WithFields()
+    {
+        ApplyPredicate(t => t.GetMembers().OfType<IFieldSymbol>()
+            .Any(f => !f.IsImplicitlyDeclared));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a field with the specified name.
+    /// </summary>
+    public TypeQuery WithField(string fieldName)
+    {
+        ApplyPredicate(t => t.GetMembers(fieldName).OfType<IFieldSymbol>().Any());
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a field matching the predicate.
+    /// </summary>
+    public TypeQuery WithFieldMatching(Func<IFieldSymbol, bool> predicate)
+    {
+        ApplyPredicate(t => t.GetMembers().OfType<IFieldSymbol>()
+            .Where(f => !f.IsImplicitlyDeclared)
+            .Any(predicate));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have any constructor.
+    /// </summary>
+    public TypeQuery WithConstructor()
+    {
+        ApplyPredicate(t => t.Constructors.Any(c => !c.IsImplicitlyDeclared));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a parameterless constructor.
+    /// </summary>
+    public TypeQuery WithParameterlessConstructor()
+    {
+        ApplyPredicate(t => t.Constructors.Any(c => c.Parameters.Length == 0));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a constructor matching the predicate.
+    /// </summary>
+    public TypeQuery WithConstructorMatching(Func<IMethodSymbol, bool> predicate)
+    {
+        ApplyPredicate(t => t.Constructors.Any(predicate));
+        return this;
+    }
+
+    #endregion
+
+    #region Namespace Filters
+
+    /// <summary>
+    /// Filter to types in the specified namespace (exact match).
+    /// </summary>
+    public TypeQuery InNamespace(string namespaceName)
+    {
+        ApplyPredicate(t =>
+            !t.ContainingNamespace.IsGlobalNamespace &&
+            t.ContainingNamespace.ToDisplayString() == namespaceName);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types in namespaces starting with the specified prefix.
+    /// </summary>
+    public TypeQuery InNamespaceStartingWith(string namespacePrefix)
+    {
+        ApplyPredicate(t =>
+            !t.ContainingNamespace.IsGlobalNamespace &&
+            t.ContainingNamespace.ToDisplayString().StartsWith(namespacePrefix, StringComparison.Ordinal));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types in namespaces ending with the specified suffix.
+    /// </summary>
+    public TypeQuery InNamespaceEndingWith(string namespaceSuffix)
+    {
+        ApplyPredicate(t =>
+            !t.ContainingNamespace.IsGlobalNamespace &&
+            t.ContainingNamespace.ToDisplayString().EndsWith(namespaceSuffix, StringComparison.Ordinal));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types in namespaces containing the specified substring.
+    /// </summary>
+    public TypeQuery InNamespaceContaining(string substring)
+    {
+        ApplyPredicate(t =>
+            !t.ContainingNamespace.IsGlobalNamespace &&
+            t.ContainingNamespace.ToDisplayString().Contains(substring));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types in namespaces matching the specified regex pattern.
+    /// </summary>
+    public TypeQuery InNamespaceMatching(string regexPattern)
+    {
+        var regex = new Regex(regexPattern, RegexOptions.Compiled);
+        ApplyPredicate(t =>
+            !t.ContainingNamespace.IsGlobalNamespace &&
+            regex.IsMatch(t.ContainingNamespace.ToDisplayString()));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types in the global namespace.
+    /// </summary>
+    public TypeQuery InGlobalNamespace()
+    {
+        ApplyPredicate(t => t.ContainingNamespace.IsGlobalNamespace);
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types in the specified namespace.
+    /// </summary>
+    public TypeQuery NotInNamespace(string namespaceName)
+    {
+        ApplyPredicate(t =>
+            t.ContainingNamespace.IsGlobalNamespace ||
+            t.ContainingNamespace.ToDisplayString() != namespaceName);
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types in namespaces starting with the specified prefix.
+    /// </summary>
+    public TypeQuery NotInNamespaceStartingWith(string namespacePrefix)
+    {
+        ApplyPredicate(t =>
+            t.ContainingNamespace.IsGlobalNamespace ||
+            !t.ContainingNamespace.ToDisplayString().StartsWith(namespacePrefix, StringComparison.Ordinal));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types in any of the specified namespaces.
+    /// </summary>
+    public TypeQuery InAnyNamespace(params string[] namespaces)
+    {
+        var nsSet = new HashSet<string>(namespaces);
+        ApplyPredicate(t =>
+            !t.ContainingNamespace.IsGlobalNamespace &&
+            nsSet.Contains(t.ContainingNamespace.ToDisplayString()));
         return this;
     }
 
@@ -167,7 +592,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery WithAttribute(string attributeFullName)
     {
-        _attributeFullName = NormalizeTypeName(attributeFullName);
+        _attributePatterns.Add(NormalizeTypeName(attributeFullName));
         _syntaxPredicates.Add(static node =>
             node is TypeDeclarationSyntax tds && tds.AttributeLists.Count > 0);
         return this;
@@ -181,6 +606,77 @@ public sealed class TypeQuery
         return WithAttribute(typeof(TAttribute).FullName!);
     }
 
+    /// <summary>
+    /// Filter to types with any of the specified attributes.
+    /// </summary>
+    public TypeQuery WithAnyAttribute(params string[] attributeFullNames)
+    {
+        foreach (var name in attributeFullNames)
+            _attributePatterns.Add(NormalizeTypeName(name));
+
+        _requireAllAttributes = false;
+        _syntaxPredicates.Add(static node =>
+            node is TypeDeclarationSyntax tds && tds.AttributeLists.Count > 0);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types with all of the specified attributes.
+    /// </summary>
+    public TypeQuery WithAllAttributes(params string[] attributeFullNames)
+    {
+        foreach (var name in attributeFullNames)
+            _attributePatterns.Add(NormalizeTypeName(name));
+
+        _requireAllAttributes = true;
+        _syntaxPredicates.Add(static node =>
+            node is TypeDeclarationSyntax tds && tds.AttributeLists.Count > 0);
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types with the specified attribute.
+    /// </summary>
+    public TypeQuery WithoutAttribute(string attributeFullName)
+    {
+        _excludedAttributePatterns.Add(NormalizeTypeName(attributeFullName));
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types with the specified attribute type.
+    /// </summary>
+    public TypeQuery WithoutAttribute<TAttribute>() where TAttribute : Attribute
+    {
+        return WithoutAttribute(typeof(TAttribute).FullName!);
+    }
+
+    /// <summary>
+    /// Filter to types with the specified attribute where the attribute matches a predicate.
+    /// </summary>
+    public TypeQuery WithAttributeWhere(string attributeFullName, Func<AttributeData, bool> predicate)
+    {
+        var pattern = NormalizeTypeName(attributeFullName);
+        _attributePatterns.Add(pattern);
+        ApplyPredicate(t =>
+        {
+            var attr = FindMatchingAttribute(t, pattern);
+            return attr is not null && predicate(attr);
+        });
+        _syntaxPredicates.Add(static node =>
+            node is TypeDeclarationSyntax tds && tds.AttributeLists.Count > 0);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types with at least the specified number of attributes.
+    /// </summary>
+    public TypeQuery WithAttributeCountAtLeast(int count)
+    {
+        ApplyPredicate(t => t.GetAttributes().Length >= count);
+        return this;
+    }
+
     #endregion
 
     #region Interface Filters
@@ -191,7 +687,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery Implementing(string interfaceFullName)
     {
-        _interfaceFullName = NormalizeTypeName(interfaceFullName);
+        _interfacePatterns.Add(NormalizeTypeName(interfaceFullName));
         return this;
     }
 
@@ -203,53 +699,292 @@ public sealed class TypeQuery
         return Implementing(typeof(TInterface).FullName!);
     }
 
-    #endregion
-
-    #region Namespace Filters
-
     /// <summary>
-    /// Filter to types in the specified namespace (exact match).
+    /// Filter to types implementing any of the specified interfaces.
     /// </summary>
-    public TypeQuery InNamespace(string namespaceName)
+    public TypeQuery ImplementingAny(params string[] interfaceFullNames)
     {
-        _semanticPredicates.Add(t =>
-            !t.ContainingNamespace.IsGlobalNamespace &&
-            t.ContainingNamespace.ToDisplayString() == namespaceName);
+        foreach (var name in interfaceFullNames)
+            _interfacePatterns.Add(NormalizeTypeName(name));
+
+        _requireAllInterfaces = false;
         return this;
     }
 
     /// <summary>
-    /// Filter to types in namespaces starting with the specified prefix.
+    /// Filter to types implementing all of the specified interfaces.
     /// </summary>
-    public TypeQuery InNamespaceStartingWith(string namespacePrefix)
+    public TypeQuery ImplementingAll(params string[] interfaceFullNames)
     {
-        _semanticPredicates.Add(t =>
-            !t.ContainingNamespace.IsGlobalNamespace &&
-            t.ContainingNamespace.ToDisplayString().StartsWith(namespacePrefix, StringComparison.Ordinal));
+        foreach (var name in interfaceFullNames)
+            _interfacePatterns.Add(NormalizeTypeName(name));
+
+        _requireAllInterfaces = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types implementing the specified interface.
+    /// </summary>
+    public TypeQuery NotImplementing(string interfaceFullName)
+    {
+        _excludedInterfacePatterns.Add(NormalizeTypeName(interfaceFullName));
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types implementing the specified interface type.
+    /// </summary>
+    public TypeQuery NotImplementing<TInterface>()
+    {
+        return NotImplementing(typeof(TInterface).FullName!);
+    }
+
+    /// <summary>
+    /// Filter to types directly implementing the specified interface (not inherited from base).
+    /// </summary>
+    public TypeQuery DirectlyImplementing(string interfaceFullName)
+    {
+        var pattern = NormalizeTypeName(interfaceFullName);
+        ApplyPredicate(t =>
+        {
+            foreach (var iface in t.Interfaces) // Interfaces, not AllInterfaces
+            {
+                if (MatchesTypeName(iface.OriginalDefinition.ToDisplayString(), pattern))
+                    return true;
+            }
+            return false;
+        });
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types implementing at least the specified number of interfaces.
+    /// </summary>
+    public TypeQuery ImplementingCountAtLeast(int count)
+    {
+        ApplyPredicate(t => t.AllInterfaces.Length >= count);
         return this;
     }
 
     #endregion
 
-    #region Custom Filters
+    #region Generic Type Filters
+
+    /// <summary>
+    /// Filter to generic types.
+    /// </summary>
+    public TypeQuery ThatAreGeneric()
+    {
+        ApplyPredicate(t => t.IsGenericType);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to non-generic types.
+    /// </summary>
+    public TypeQuery ThatAreNonGeneric()
+    {
+        ApplyPredicate(t => !t.IsGenericType);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types with exactly the specified number of type parameters.
+    /// </summary>
+    public TypeQuery WithTypeParameterCount(int count)
+    {
+        ApplyPredicate(t => t.TypeParameters.Length == count);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types with at least the specified number of type parameters.
+    /// </summary>
+    public TypeQuery WithTypeParameterCountAtLeast(int count)
+    {
+        ApplyPredicate(t => t.TypeParameters.Length >= count);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types with a type parameter with the specified name.
+    /// </summary>
+    public TypeQuery WithTypeParameter(string name)
+    {
+        ApplyPredicate(t => t.TypeParameters.Any(tp => tp.Name == name));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types with any constrained type parameters.
+    /// </summary>
+    public TypeQuery WithConstrainedTypeParameters()
+    {
+        ApplyPredicate(t => t.TypeParameters.Any(tp =>
+            tp.HasConstructorConstraint ||
+            tp.HasReferenceTypeConstraint ||
+            tp.HasValueTypeConstraint ||
+            tp.HasNotNullConstraint ||
+            tp.HasUnmanagedTypeConstraint ||
+            tp.ConstraintTypes.Length > 0));
+        return this;
+    }
+
+    #endregion
+
+    #region Nesting Filters
+
+    /// <summary>
+    /// Filter to nested types (inside another type).
+    /// </summary>
+    public TypeQuery ThatAreNested()
+    {
+        ApplyPredicate(t => t.ContainingType is not null);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to top-level types (not nested).
+    /// </summary>
+    public TypeQuery ThatAreTopLevel()
+    {
+        ApplyPredicate(t => t.ContainingType is null);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types nested in a type with the specified name.
+    /// </summary>
+    public TypeQuery NestedIn(string containingTypeName)
+    {
+        ApplyPredicate(t =>
+            t.ContainingType is not null &&
+            t.ContainingType.Name == containingTypeName);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types nested in a type matching the predicate.
+    /// </summary>
+    public TypeQuery NestedInTypeMatching(Func<INamedTypeSymbol, bool> predicate)
+    {
+        ApplyPredicate(t =>
+            t.ContainingType is not null &&
+            predicate(t.ContainingType));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have nested types.
+    /// </summary>
+    public TypeQuery WithNestedTypes()
+    {
+        ApplyPredicate(t => t.GetTypeMembers().Length > 0);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types that have a nested type with the specified name.
+    /// </summary>
+    public TypeQuery WithNestedType(string nestedTypeName)
+    {
+        ApplyPredicate(t => t.GetTypeMembers(nestedTypeName).Length > 0);
+        return this;
+    }
+
+    #endregion
+
+    #region Source Location Filters
+
+    /// <summary>
+    /// Filter to types in a file with the specified name.
+    /// </summary>
+    public TypeQuery InFile(string fileName)
+    {
+        ApplySyntaxPredicate(node =>
+            node.SyntaxTree.FilePath.EndsWith(fileName, StringComparison.OrdinalIgnoreCase));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types in files matching the specified pattern (supports * and ?).
+    /// </summary>
+    public TypeQuery InFileMatching(string pattern)
+    {
+        var regex = GlobToRegex(pattern);
+        ApplySyntaxPredicate(node =>
+            regex.IsMatch(Path.GetFileName(node.SyntaxTree.FilePath)));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types in files whose path contains the specified substring.
+    /// </summary>
+    public TypeQuery InFilePath(string pathSubstring)
+    {
+        ApplySyntaxPredicate(node =>
+            node.SyntaxTree.FilePath.Contains(pathSubstring));
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types in generated code files (*.g.cs, *.generated.cs, *.designer.cs).
+    /// </summary>
+    public TypeQuery NotInGeneratedCode()
+    {
+        ApplySyntaxPredicate(node =>
+        {
+            var filePath = node.SyntaxTree.FilePath;
+            return !filePath.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase) &&
+                   !filePath.EndsWith(".generated.cs", StringComparison.OrdinalIgnoreCase) &&
+                   !filePath.EndsWith(".designer.cs", StringComparison.OrdinalIgnoreCase);
+        });
+        return this;
+    }
+
+    /// <summary>
+    /// Filter with a custom syntax tree predicate.
+    /// </summary>
+    public TypeQuery InSyntaxTree(Func<SyntaxTree, bool> predicate)
+    {
+        ApplySyntaxPredicate(node => predicate(node.SyntaxTree));
+        return this;
+    }
+
+    #endregion
+
+    #region Low-Level / Raw Access
 
     /// <summary>
     /// Add a custom syntax-level predicate.
     /// </summary>
-    public TypeQuery Where(Func<SyntaxNode, bool> syntaxPredicate)
+    public TypeQuery WithSyntax(Func<TypeDeclarationSyntax, bool> predicate)
     {
-        _syntaxPredicates.Add(syntaxPredicate);
+        ApplySyntaxPredicate(node => node is TypeDeclarationSyntax tds && predicate(tds));
         return this;
     }
 
     /// <summary>
     /// Add a custom semantic-level predicate.
     /// </summary>
-    public TypeQuery Where(Func<INamedTypeSymbol, bool> semanticPredicate)
+    public TypeQuery Where(Func<INamedTypeSymbol, bool> predicate)
     {
-        _semanticPredicates.Add(semanticPredicate);
+        ApplyPredicate(predicate);
         return this;
     }
+
+    /// <summary>
+    /// Add a custom predicate with access to both syntax and symbol.
+    /// </summary>
+    public TypeQuery Where(Func<TypeDeclarationSyntax, INamedTypeSymbol, bool> predicate)
+    {
+        // Store this for use in the transform
+        _combinedPredicates.Add(predicate);
+        return this;
+    }
+
+    readonly List<Func<TypeDeclarationSyntax, INamedTypeSymbol, bool>> _combinedPredicates = [];
 
     #endregion
 
@@ -260,21 +995,20 @@ public sealed class TypeQuery
     /// </summary>
     public void ForEach(Action<INamedTypeSymbol, SourceEmitter> action)
     {
-        var provider = _context.SyntaxProvider.CreateSyntaxProvider(
-            predicate: CreateSyntaxPredicate(),
-            transform: CreateSemanticTransform()
-        ).Where(static result => result.Symbol is not null);
+        var provider = CreateProvider();
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
-            var emitter = new SourceEmitter(spc, result.Symbol!);
+            if (result.Symbol is null) return;
+
+            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
-                action(result.Symbol!, emitter);
+                action(result.Symbol, emitter);
             }
             catch (Exception ex)
             {
-                emitter.ReportError("GEN500", "Generator failed", ex.ToString());
+                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
             }
         });
     }
@@ -284,24 +1018,50 @@ public sealed class TypeQuery
     /// </summary>
     public void ForEach(Action<INamedTypeSymbol, AttributeMatch, SourceEmitter> action)
     {
-        if (_attributeFullName is null)
+        if (_attributePatterns.Count == 0)
             throw new InvalidOperationException("WithAttribute must be called before using this overload");
 
-        var provider = _context.SyntaxProvider.CreateSyntaxProvider(
-            predicate: CreateSyntaxPredicate(),
-            transform: CreateSemanticTransform()
-        ).Where(static result => result.Symbol is not null && result.Attribute is not null);
+        var provider = CreateProvider();
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
-            var emitter = new SourceEmitter(spc, result.Symbol!);
+            if (result.Symbol is null || result.Attributes.Count == 0) return;
+
+            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
-                action(result.Symbol!, new AttributeMatch(result.Attribute!), emitter);
+                action(result.Symbol, new AttributeMatch(result.Attributes[0]), emitter);
             }
             catch (Exception ex)
             {
-                emitter.ReportError("GEN500", "Generator failed", ex.ToString());
+                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+            }
+        });
+    }
+
+    /// <summary>
+    /// Execute the query with multiple attribute data and process each matching type.
+    /// </summary>
+    public void ForEach(Action<INamedTypeSymbol, IReadOnlyList<AttributeMatch>, SourceEmitter> action)
+    {
+        if (_attributePatterns.Count == 0)
+            throw new InvalidOperationException("WithAttribute/WithAllAttributes must be called before using this overload");
+
+        var provider = CreateProvider();
+
+        _context.RegisterSourceOutput(provider, (spc, result) =>
+        {
+            if (result.Symbol is null || result.Attributes.Count == 0) return;
+
+            var emitter = new SourceEmitter(spc, result.Symbol);
+            try
+            {
+                var matches = result.Attributes.Select(a => new AttributeMatch(a)).ToList();
+                action(result.Symbol, matches, emitter);
+            }
+            catch (Exception ex)
+            {
+                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
             }
         });
     }
@@ -311,24 +1071,134 @@ public sealed class TypeQuery
     /// </summary>
     public void ForEach(Action<INamedTypeSymbol, InterfaceMatch, SourceEmitter> action)
     {
-        if (_interfaceFullName is null)
+        if (_interfacePatterns.Count == 0)
             throw new InvalidOperationException("Implementing must be called before using this overload");
 
-        var provider = _context.SyntaxProvider.CreateSyntaxProvider(
-            predicate: CreateSyntaxPredicate(),
-            transform: CreateSemanticTransform()
-        ).Where(static result => result.Symbol is not null && result.Interface is not null);
+        var provider = CreateProvider();
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
-            var emitter = new SourceEmitter(spc, result.Symbol!);
+            if (result.Symbol is null || result.Interfaces.Count == 0) return;
+
+            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
-                action(result.Symbol!, new InterfaceMatch(result.Interface!), emitter);
+                action(result.Symbol, new InterfaceMatch(result.Interfaces[0]), emitter);
             }
             catch (Exception ex)
             {
-                emitter.ReportError("GEN500", "Generator failed", ex.ToString());
+                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+            }
+        });
+    }
+
+    /// <summary>
+    /// Execute the query with multiple interface data and process each matching type.
+    /// </summary>
+    public void ForEach(Action<INamedTypeSymbol, IReadOnlyList<InterfaceMatch>, SourceEmitter> action)
+    {
+        if (_interfacePatterns.Count == 0)
+            throw new InvalidOperationException("Implementing/ImplementingAll must be called before using this overload");
+
+        var provider = CreateProvider();
+
+        _context.RegisterSourceOutput(provider, (spc, result) =>
+        {
+            if (result.Symbol is null || result.Interfaces.Count == 0) return;
+
+            var emitter = new SourceEmitter(spc, result.Symbol);
+            try
+            {
+                var matches = result.Interfaces.Select(i => new InterfaceMatch(i)).ToList();
+                action(result.Symbol, matches, emitter);
+            }
+            catch (Exception ex)
+            {
+                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+            }
+        });
+    }
+
+    /// <summary>
+    /// Execute the query with both attribute and interface data.
+    /// </summary>
+    public void ForEach(Action<INamedTypeSymbol, AttributeMatch, InterfaceMatch, SourceEmitter> action)
+    {
+        if (_attributePatterns.Count == 0)
+            throw new InvalidOperationException("WithAttribute must be called before using this overload");
+        if (_interfacePatterns.Count == 0)
+            throw new InvalidOperationException("Implementing must be called before using this overload");
+
+        var provider = CreateProvider();
+
+        _context.RegisterSourceOutput(provider, (spc, result) =>
+        {
+            if (result.Symbol is null || result.Attributes.Count == 0 || result.Interfaces.Count == 0) return;
+
+            var emitter = new SourceEmitter(spc, result.Symbol);
+            try
+            {
+                action(result.Symbol, new AttributeMatch(result.Attributes[0]), new InterfaceMatch(result.Interfaces[0]), emitter);
+            }
+            catch (Exception ex)
+            {
+                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+            }
+        });
+    }
+
+    /// <summary>
+    /// Collect all matching types and process them together.
+    /// Useful for generating registries, factories, or aggregate files.
+    /// </summary>
+    public void ForAll(Action<IReadOnlyList<INamedTypeSymbol>, CollectionEmitter> action)
+    {
+        var provider = CreateProvider().Collect();
+
+        _context.RegisterSourceOutput(provider, (spc, results) =>
+        {
+            var symbols = results.Where(r => r.Symbol is not null).Select(r => r.Symbol!).ToList();
+            if (symbols.Count == 0) return;
+
+            var emitter = new CollectionEmitter(spc);
+            try
+            {
+                action(symbols, emitter);
+            }
+            catch (Exception ex)
+            {
+                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+            }
+        });
+    }
+
+    /// <summary>
+    /// Collect all matching types with their attribute data and process them together.
+    /// </summary>
+    public void ForAll(Action<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, CollectionEmitter> action)
+    {
+        if (_attributePatterns.Count == 0)
+            throw new InvalidOperationException("WithAttribute must be called before using this overload");
+
+        var provider = CreateProvider().Collect();
+
+        _context.RegisterSourceOutput(provider, (spc, results) =>
+        {
+            var items = results
+                .Where(r => r.Symbol is not null && r.Attributes.Count > 0)
+                .Select(r => (r.Symbol!, new AttributeMatch(r.Attributes[0])))
+                .ToList();
+
+            if (items.Count == 0) return;
+
+            var emitter = new CollectionEmitter(spc);
+            try
+            {
+                action(items, emitter);
+            }
+            catch (Exception ex)
+            {
+                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
             }
         });
     }
@@ -337,101 +1207,199 @@ public sealed class TypeQuery
 
     #region Internal Helpers
 
-    Func<SyntaxNode, CancellationToken, bool> CreateSyntaxPredicate()
+    IncrementalValuesProvider<QueryResult> CreateProvider()
     {
-        return (node, _) =>
-        {
-            if (node is not TypeDeclarationSyntax)
-                return false;
-
-            foreach (var predicate in _syntaxPredicates)
-            {
-                if (!predicate(node))
-                    return false;
-            }
-
-            return true;
-        };
-    }
-
-    Func<GeneratorSyntaxContext, CancellationToken, QueryResult> CreateSemanticTransform()
-    {
-        // Capture these for the lambda
-        var typeFilter = _typeFilter;
-        var attributeName = _attributeFullName;
-        var interfaceName = _interfaceFullName;
+        // Capture state for lambdas
+        var syntaxPredicates = _syntaxPredicates.ToList();
         var semanticPredicates = _semanticPredicates.ToList();
+        var combinedPredicates = _combinedPredicates.ToList();
+        var attributePatterns = _attributePatterns.ToList();
+        var interfacePatterns = _interfacePatterns.ToList();
+        var excludedAttributePatterns = _excludedAttributePatterns.ToList();
+        var excludedInterfacePatterns = _excludedInterfacePatterns.ToList();
+        var requireAllAttributes = _requireAllAttributes;
+        var requireAllInterfaces = _requireAllInterfaces;
 
-        return (ctx, _) =>
-        {
-            if (ctx.SemanticModel.GetDeclaredSymbol(ctx.Node) is not INamedTypeSymbol symbol)
-                return default;
-
-            // Apply type filter
-            if (!MatchesTypeFilter(symbol, typeFilter))
-                return default;
-
-            // Apply semantic predicates
-            foreach (var predicate in semanticPredicates)
+        return _context.SyntaxProvider.CreateSyntaxProvider(
+            predicate: (node, _) =>
             {
-                if (!predicate(symbol))
-                    return default;
-            }
+                if (node is not TypeDeclarationSyntax)
+                    return false;
 
-            // Find matching attribute
-            AttributeData? matchedAttribute = null;
-            if (attributeName is not null)
+                foreach (var predicate in syntaxPredicates)
+                {
+                    if (!predicate(node))
+                        return false;
+                }
+
+                return true;
+            },
+            transform: (ctx, _) =>
             {
-                matchedAttribute = FindMatchingAttribute(symbol, attributeName);
-                if (matchedAttribute is null)
+                if (ctx.SemanticModel.GetDeclaredSymbol(ctx.Node) is not INamedTypeSymbol symbol)
                     return default;
-            }
 
-            // Find matching interface
-            INamedTypeSymbol? matchedInterface = null;
-            if (interfaceName is not null)
-            {
-                matchedInterface = FindMatchingInterface(symbol, interfaceName);
-                if (matchedInterface is null)
-                    return default;
-            }
+                var syntax = (TypeDeclarationSyntax)ctx.Node;
 
-            return new QueryResult(symbol, matchedAttribute, matchedInterface);
-        };
+                // Apply semantic predicates
+                foreach (var predicate in semanticPredicates)
+                {
+                    if (!predicate(symbol))
+                        return default;
+                }
+
+                // Apply combined predicates
+                foreach (var predicate in combinedPredicates)
+                {
+                    if (!predicate(syntax, symbol))
+                        return default;
+                }
+
+                // Find matching attributes
+                var matchedAttributes = new List<AttributeData>();
+                if (attributePatterns.Count > 0)
+                {
+                    foreach (var pattern in attributePatterns)
+                    {
+                        var attr = FindMatchingAttribute(symbol, pattern);
+                        if (attr is not null)
+                            matchedAttributes.Add(attr);
+                    }
+
+                    if (requireAllAttributes && matchedAttributes.Count != attributePatterns.Count)
+                        return default;
+                    if (!requireAllAttributes && matchedAttributes.Count == 0)
+                        return default;
+                }
+
+                // Check excluded attributes
+                foreach (var pattern in excludedAttributePatterns)
+                {
+                    if (FindMatchingAttribute(symbol, pattern) is not null)
+                        return default;
+                }
+
+                // Find matching interfaces
+                var matchedInterfaces = new List<INamedTypeSymbol>();
+                if (interfacePatterns.Count > 0)
+                {
+                    foreach (var pattern in interfacePatterns)
+                    {
+                        var iface = FindMatchingInterface(symbol, pattern);
+                        if (iface is not null)
+                            matchedInterfaces.Add(iface);
+                    }
+
+                    if (requireAllInterfaces && matchedInterfaces.Count != interfacePatterns.Count)
+                        return default;
+                    if (!requireAllInterfaces && matchedInterfaces.Count == 0)
+                        return default;
+                }
+
+                // Check excluded interfaces
+                foreach (var pattern in excludedInterfacePatterns)
+                {
+                    if (FindMatchingInterface(symbol, pattern) is not null)
+                        return default;
+                }
+
+                return new QueryResult(symbol, matchedAttributes, matchedInterfaces);
+            }
+        ).Where(static result => result.Symbol is not null);
     }
 
-    static bool MatchesTypeFilter(INamedTypeSymbol symbol, TypeFilter filter)
+    static bool MatchesTypeKind(INamedTypeSymbol symbol, TypeKind kind)
     {
-        if (filter == TypeFilter.None)
+        if (kind == TypeKind.None)
             return true;
 
-        // Check type kinds (if any specified)
-        var hasKindFilter = (filter & TypeFilter.AnyType) != 0;
-        if (hasKindFilter)
+        var symbolKind = symbol switch
         {
-            var kindMatches = false;
+            { IsRecord: true, TypeKind: Microsoft.CodeAnalysis.TypeKind.Class } => TypeKind.RecordClass,
+            { IsRecord: true, TypeKind: Microsoft.CodeAnalysis.TypeKind.Struct } => TypeKind.RecordStruct,
+            { TypeKind: Microsoft.CodeAnalysis.TypeKind.Class } => TypeKind.Class,
+            { TypeKind: Microsoft.CodeAnalysis.TypeKind.Struct } => TypeKind.Struct,
+            { TypeKind: Microsoft.CodeAnalysis.TypeKind.Interface } => TypeKind.Interface,
+            { TypeKind: Microsoft.CodeAnalysis.TypeKind.Enum } => TypeKind.Enum,
+            { TypeKind: Microsoft.CodeAnalysis.TypeKind.Delegate } => TypeKind.Delegate,
+            _ => TypeKind.None
+        };
 
-            if ((filter & TypeFilter.Class) != 0 && symbol.TypeKind == TypeKind.Class && !symbol.IsRecord)
-                kindMatches = true;
-            if ((filter & TypeFilter.Struct) != 0 && symbol.TypeKind == TypeKind.Struct && !symbol.IsRecord)
-                kindMatches = true;
-            if ((filter & TypeFilter.Record) != 0 && symbol.IsRecord && symbol.TypeKind == TypeKind.Class)
-                kindMatches = true;
-            if ((filter & TypeFilter.RecordStruct) != 0 && symbol.IsRecord && symbol.TypeKind == TypeKind.Struct)
-                kindMatches = true;
-            if ((filter & TypeFilter.Interface) != 0 && symbol.TypeKind == TypeKind.Interface)
-                kindMatches = true;
-            if ((filter & TypeFilter.Enum) != 0 && symbol.TypeKind == TypeKind.Enum)
-                kindMatches = true;
+        return (kind & symbolKind) != 0;
+    }
 
-            if (!kindMatches)
+    static bool MatchesModifiers(INamedTypeSymbol symbol, TypeModifiers modifiers)
+    {
+        if (modifiers == TypeModifiers.None)
+            return true;
+
+        if ((modifiers & TypeModifiers.Static) != 0 && !symbol.IsStatic)
+            return false;
+        if ((modifiers & TypeModifiers.Abstract) != 0 && !symbol.IsAbstract)
+            return false;
+        if ((modifiers & TypeModifiers.Sealed) != 0 && !symbol.IsSealed)
+            return false;
+        if ((modifiers & TypeModifiers.Readonly) != 0 && !symbol.IsReadOnly)
+            return false;
+        if ((modifiers & TypeModifiers.Ref) != 0 && !symbol.IsRefLikeType)
+            return false;
+
+        // Partial requires syntax check - handled separately
+        if ((modifiers & TypeModifiers.Partial) != 0)
+        {
+            var isPartial = symbol.DeclaringSyntaxReferences
+                .Select(r => r.GetSyntax())
+                .OfType<TypeDeclarationSyntax>()
+                .Any(s => s.Modifiers.Any(m => m.IsKind(SyntaxKind.PartialKeyword)));
+            if (!isPartial)
                 return false;
         }
 
         return true;
     }
 
-    static AttributeData? FindMatchingAttribute(INamedTypeSymbol symbol, string attributeName)
+    static bool MatchesAccessibility(INamedTypeSymbol symbol, TypeAccessibility accessibility)
+    {
+        if (accessibility == TypeAccessibility.None)
+            return true;
+
+        var symbolAccessibility = symbol.DeclaredAccessibility switch
+        {
+            Accessibility.Private => TypeAccessibility.Private,
+            Accessibility.Protected => TypeAccessibility.Protected,
+            Accessibility.Internal => TypeAccessibility.Internal,
+            Accessibility.ProtectedOrInternal => TypeAccessibility.ProtectedInternal,
+            Accessibility.ProtectedAndInternal => TypeAccessibility.PrivateProtected,
+            Accessibility.Public => TypeAccessibility.Public,
+            _ => TypeAccessibility.None
+        };
+
+        return (accessibility & symbolAccessibility) != 0;
+    }
+
+    static bool IsDerivedFrom(INamedTypeSymbol symbol, string pattern, bool transitive)
+    {
+        if (transitive)
+        {
+            var current = symbol.BaseType;
+            while (current is not null)
+            {
+                if (MatchesTypeName(current.OriginalDefinition.ToDisplayString(), pattern))
+                    return true;
+                current = current.BaseType;
+            }
+        }
+        else
+        {
+            if (symbol.BaseType is not null &&
+                MatchesTypeName(symbol.BaseType.OriginalDefinition.ToDisplayString(), pattern))
+                return true;
+        }
+
+        return false;
+    }
+
+    static AttributeData? FindMatchingAttribute(INamedTypeSymbol symbol, string pattern)
     {
         foreach (var attr in symbol.GetAttributes())
         {
@@ -440,21 +1408,20 @@ public sealed class TypeQuery
 
             var attrFullName = attrClass.OriginalDefinition.ToDisplayString();
 
-            // Handle generic attribute matching (e.g., "MyAttr<>" matches "MyAttr<int>")
-            if (MatchesTypeName(attrFullName, attributeName))
+            if (MatchesTypeName(attrFullName, pattern))
                 return attr;
         }
 
         return null;
     }
 
-    static INamedTypeSymbol? FindMatchingInterface(INamedTypeSymbol symbol, string interfaceName)
+    static INamedTypeSymbol? FindMatchingInterface(INamedTypeSymbol symbol, string pattern)
     {
         foreach (var iface in symbol.AllInterfaces)
         {
             var ifaceFullName = iface.OriginalDefinition.ToDisplayString();
 
-            if (MatchesTypeName(ifaceFullName, interfaceName))
+            if (MatchesTypeName(ifaceFullName, pattern))
                 return iface;
         }
 
@@ -463,7 +1430,6 @@ public sealed class TypeQuery
 
     static bool MatchesTypeName(string actualName, string pattern)
     {
-        // Direct match
         if (actualName == pattern)
             return true;
 
@@ -481,17 +1447,23 @@ public sealed class TypeQuery
         return false;
     }
 
-    static string NormalizeTypeName(string name)
+    static string NormalizeTypeName(string name) => name;
+
+    static Regex GlobToRegex(string pattern)
     {
-        // Remove "Attribute" suffix if present for convenience
-        // "MyAttribute" and "My" both match "MyAttribute"
-        return name;
+        var regexPattern = "^" + Regex.Escape(pattern)
+            .Replace("\\*", ".*")
+            .Replace("\\?", ".") + "$";
+        return new Regex(regexPattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
     }
 
     #endregion
 
     internal readonly record struct QueryResult(
         INamedTypeSymbol? Symbol,
-        AttributeData? Attribute,
-        INamedTypeSymbol? Interface);
+        List<AttributeData> Attributes,
+        List<INamedTypeSymbol> Interfaces)
+    {
+        public QueryResult() : this(null, [], []) { }
+    }
 }

@@ -73,39 +73,7 @@ public class ValueObjectGenerator : ISourceGenerator
         }
     }
 
-    public void Initialize(GeneratorInitializationContext context)
-    {
-        context.RegisterForSyntaxNotifications(() => new ValueObjectSyntaxReceiver());
-    }
-
-    public void Execute(GeneratorExecutionContext context)
-    {
-        if (context.SyntaxReceiver is not ValueObjectSyntaxReceiver receiver)
-            return;
-
-        foreach (var typeDeclaration in receiver.CandidateTypes)
-        {
-            var semanticModel = context.Compilation.GetSemanticModel(typeDeclaration.SyntaxTree);
-            if (semanticModel.GetDeclaredSymbol(typeDeclaration) is not { } typeSymbol)
-                continue;
-
-            var (hasAttribute, valueType) = HasValueObjectAttribute(typeSymbol);
-            if (!hasAttribute || valueType is null)
-                continue;
-
-            // ... 100+ more lines of generation logic, diagnostics, file naming ...
-        }
-    }
-
-    static (bool, ITypeSymbol?) HasValueObjectAttribute(INamedTypeSymbol typeSymbol)
-    {
-        var attr = typeSymbol.GetAttributes()
-            .FirstOrDefault(a => a.AttributeClass?.ToDisplayString()
-                .StartsWith("Kurrent.ValueObjectAttribute") == true);
-
-        var valueType = attr?.AttributeClass?.TypeArguments.FirstOrDefault();
-        return (attr is not null, valueType);
-    }
+    // ... 100+ more lines of boilerplate ...
 }
 ```
 
@@ -128,18 +96,11 @@ public class ValueObjectGenerator : FluentGenerator
                     $$"""
                     {{type.GetNamespaceDeclaration()}}
 
-                    [System.Diagnostics.DebuggerDisplay("{GetDebugString()}")]
                     readonly partial record struct {{type.Name}}
                     {
                         public {{valueType.FullName()}} Value { get; private init; }
-
-                        public static {{type.Name}} From({{valueType.FullName()}} value) => new() { Value = value };
-
                         public static implicit operator {{valueType.FullName()}}({{type.Name}} _) => _.Value;
-                        public static implicit operator {{type.Name}}({{valueType.FullName()}} _) => From(_);
-
-                        string GetDebugString() => $"{{type.Name}}: {Value}";
-                        public override string ToString() => Value?.ToString() ?? "";
+                        public static implicit operator {{type.Name}}({{valueType.FullName()}} _) => new() { Value = _ };
                     }
                     """,
                     valueType);
@@ -148,67 +109,33 @@ public class ValueObjectGenerator : FluentGenerator
 }
 ```
 
-### Example 2: ResultBaseImplicitOperatorsGenerator
+### Example 2: Service Registry Generator (ForAll)
 
-**Before (100+ lines):**
 ```csharp
 [Generator]
-public class ResultBaseImplicitOperatorsGenerator : IIncrementalGenerator
-{
-    public void Initialize(IncrementalGeneratorInitializationContext context)
-    {
-        var candidateTypes = context.SyntaxProvider
-            .CreateSyntaxProvider(
-                predicate: static (node, _) => node is RecordDeclarationSyntax,
-                transform: static (ctx, _) =>
-                {
-                    var recordDecl = (RecordDeclarationSyntax)ctx.Node;
-                    var symbol = ctx.SemanticModel.GetDeclaredSymbol(recordDecl);
-
-                    if (symbol is null) return null;
-
-                    foreach (var iface in symbol.AllInterfaces)
-                    {
-                        if (iface.OriginalDefinition.ToDisplayString() == "Kurrent.IResultBase<TValue, TError>")
-                            return symbol;
-                    }
-                    return null;
-                })
-            .Where(static m => m is not null);
-
-        context.RegisterSourceOutput(candidateTypes, static (spc, typeSymbol) =>
-        {
-            // ... 80+ more lines extracting interfaces, building source ...
-        });
-    }
-}
-```
-
-**After (25 lines):**
-```csharp
-[Generator]
-public class ResultBaseImplicitOperatorsGenerator : FluentGenerator
+public class ServiceRegistryGenerator : FluentGenerator
 {
     protected override void Configure(GeneratorContext ctx)
     {
         ctx.Types
-            .ThatAreRecords()
-            .Implementing("Kurrent.IResultBase<,>")
-            .ForEach((type, iface, emit) =>
+            .ThatAreClasses()
+            .Implementing("IService")
+            .WithAccessibility(TypeAccessibility.Public)
+            .ForAll((types, emit) =>
             {
-                var tValue = iface.TypeArgument(0);
-                var tError = iface.TypeArgument(1);
+                var registrations = string.Join("\n            ",
+                    types.Select(t => $"services.AddScoped<{t.FullName()}>();"));
 
-                emit.Source($"{type.Name}.Operators.g.cs", $$"""
-                    {{type.GetNamespaceDeclaration()}}
+                emit.Source("ServiceRegistry.g.cs", $$"""
+                    using Microsoft.Extensions.DependencyInjection;
 
-                    partial record {{type.Name}}
+                    public static class ServiceRegistry
                     {
-                        {{type.Name}}({{tValue.FullName()}} value) : base(true, value, default) { }
-                        {{type.Name}}({{tError.FullName()}} error) : base(false, default, error) { }
-
-                        public static implicit operator {{type.Name}}({{tValue.FullName()}} value) => new(value);
-                        public static implicit operator {{type.Name}}({{tError.FullName()}} error) => new(error);
+                        public static IServiceCollection AddGeneratedServices(this IServiceCollection services)
+                        {
+                            {{registrations}}
+                            return services;
+                        }
                     }
                     """);
             });
@@ -216,51 +143,173 @@ public class ResultBaseImplicitOperatorsGenerator : FluentGenerator
 }
 ```
 
-## API Reference
+## Complete API Reference
 
-### Type Queries
-
-Start with `ctx.Types` and chain filters:
+### Type Kind Filters
 
 ```csharp
 ctx.Types
-    // Type kind filters
-    .ThatAreClasses()
-    .ThatAreStructs()
-    .ThatAreRecords()           // record class or record struct
-    .ThatAreRecordClasses()
-    .ThatAreRecordStructs()
+    .ThatAreClasses()              // Non-record classes
+    .ThatAreStructs()              // Non-record structs
+    .ThatAreRecords()              // Record class or record struct
+    .ThatAreRecordClasses()        // Record classes only
+    .ThatAreRecordStructs()        // Record structs only
     .ThatAreInterfaces()
     .ThatAreEnums()
+    .ThatAreDelegates()
+    .ThatAreReferenceTypes()       // Any reference type
+    .ThatAreValueTypes()           // Any value type
+    .OfKind(TypeKind.AnyClass)     // Using flags enum
+```
 
-    // Modifier filters
+### Modifier Filters
+
+```csharp
+ctx.Types
     .ThatArePartial()
     .ThatAreStatic()
     .ThatAreAbstract()
     .ThatAreSealed()
+    .ThatAreReadonly()             // Readonly structs
+    .ThatAreRefStructs()           // Ref structs
+    .WithModifiers(TypeModifiers.Partial | TypeModifiers.Sealed)
+```
 
-    // Visibility filters
+### Accessibility Filters
+
+```csharp
+ctx.Types
     .ThatArePublic()
     .ThatAreInternal()
+    .WithAccessibility(TypeAccessibility.Public)
+    .WithAccessibility(TypeAccessibility.PublicOrInternal)  // Combined
+    .WithoutAccessibility(TypeAccessibility.Private)        // Exclusion
+```
 
-    // Attribute filters (use <> for generic attributes)
-    .WithAttribute("MyNamespace.MyAttribute")
-    .WithAttribute("MyNamespace.MyAttribute<>")      // generic
-    .WithAttribute("MyNamespace.MyAttribute<,>")     // 2 type params
-    .WithAttribute<MyAttribute>()                     // compile-time
+### Base Type / Inheritance Filters
 
-    // Interface filters
-    .Implementing("IMyInterface")
-    .Implementing("IMyInterface<>")
-    .Implementing<IMyInterface>()
+```csharp
+ctx.Types
+    .DerivedFrom("MyNamespace.BaseClass")      // Direct or transitive
+    .DerivedFrom<BaseClass>()                   // Generic version
+    .DirectlyDerivedFrom("BaseClass")           // Direct parent only
+    .NotDerivedFrom("BaseClass")                // Exclusion
+```
 
-    // Namespace filters
-    .InNamespace("MyNamespace")
-    .InNamespaceStartingWith("MyNamespace.")
+### Member Filters
 
-    // Custom filters
-    .Where((SyntaxNode node) => /* custom syntax check */)
-    .Where((INamedTypeSymbol symbol) => /* custom semantic check */)
+```csharp
+ctx.Types
+    .WithMembers()                              // Has any members
+    .WithMethods()                              // Has any methods
+    .WithMethod("MethodName")                   // Has specific method
+    .WithMethodMatching(m => m.IsAsync)         // Custom method predicate
+    .WithProperties()                           // Has any properties
+    .WithProperty("PropertyName")               // Has specific property
+    .WithPropertyMatching(p => p.IsRequired)    // Custom property predicate
+    .WithPropertyOfType("System.String")        // Property of specific type
+    .WithFields()                               // Has any fields
+    .WithField("_fieldName")                    // Has specific field
+    .WithFieldMatching(f => f.IsReadOnly)       // Custom field predicate
+    .WithConstructor()                          // Has explicit constructor
+    .WithParameterlessConstructor()             // Has default constructor
+    .WithConstructorMatching(c => c.Parameters.Length == 2)
+```
+
+### Namespace Filters
+
+```csharp
+ctx.Types
+    .InNamespace("MyNamespace")                 // Exact match
+    .InNamespaceStartingWith("MyNamespace.")    // Prefix match
+    .InNamespaceEndingWith(".Models")           // Suffix match
+    .InNamespaceContaining("Domain")            // Contains substring
+    .InNamespaceMatching(@"^My\..*\.Core$")     // Regex pattern
+    .InGlobalNamespace()                        // Global namespace only
+    .InAnyNamespace("NS1", "NS2", "NS3")        // Any of these
+    .NotInNamespace("System")                   // Exclusion
+    .NotInNamespaceStartingWith("Microsoft.")   // Exclude prefix
+```
+
+### Attribute Filters
+
+```csharp
+ctx.Types
+    .WithAttribute("MyNamespace.MyAttribute")           // Has attribute
+    .WithAttribute("MyAttribute<>")                     // Generic attribute
+    .WithAttribute<ObsoleteAttribute>()                 // Compile-time type
+    .WithAnyAttribute("Attr1", "Attr2")                 // Has ANY of these
+    .WithAllAttributes("Attr1", "Attr2")                // Has ALL of these
+    .WithoutAttribute("ObsoleteAttribute")              // Exclusion
+    .WithAttributeWhere("MyAttr", a => a.ConstructorArguments.Length > 0)
+    .WithAttributeCountAtLeast(2)                       // At least N attributes
+```
+
+### Interface Filters
+
+```csharp
+ctx.Types
+    .Implementing("IMyInterface")                       // Implements interface
+    .Implementing("IGeneric<>")                         // Generic interface
+    .Implementing<IDisposable>()                        // Compile-time type
+    .ImplementingAny("IFoo", "IBar")                    // Implements ANY
+    .ImplementingAll("IFoo", "IBar")                    // Implements ALL
+    .DirectlyImplementing("IFoo")                       // Not inherited from base
+    .NotImplementing("IDisposable")                     // Exclusion
+    .ImplementingCountAtLeast(2)                        // At least N interfaces
+```
+
+### Generic Type Filters
+
+```csharp
+ctx.Types
+    .ThatAreGeneric()                                   // Is generic type
+    .ThatAreNonGeneric()                                // Not generic
+    .WithTypeParameterCount(2)                          // Exactly N type params
+    .WithTypeParameterCountAtLeast(1)                   // At least N type params
+    .WithTypeParameter("T")                             // Has type param named "T"
+    .WithConstrainedTypeParameters()                    // Has any constraints
+```
+
+### Nesting Filters
+
+```csharp
+ctx.Types
+    .ThatAreNested()                                    // Inside another type
+    .ThatAreTopLevel()                                  // Not nested
+    .NestedIn("ContainerClass")                         // Nested in specific type
+    .NestedInTypeMatching(t => t.IsStatic)              // Custom predicate
+    .WithNestedTypes()                                  // Has nested types
+    .WithNestedType("InnerClass")                       // Has specific nested type
+```
+
+### Source Location Filters
+
+```csharp
+ctx.Types
+    .InFile("MyFile.cs")                                // Specific file name
+    .InFileMatching("*.Models.cs")                      // Glob pattern
+    .InFilePath("src/Domain/")                          // Path contains
+    .NotInGeneratedCode()                               // Exclude *.g.cs, etc.
+    .InSyntaxTree(tree => /* custom predicate */)
+```
+
+### Negation Modifier
+
+```csharp
+ctx.Types
+    .Not.ThatAreClasses()                               // Negates next filter
+    .Not.WithAttribute("Obsolete")
+    .Not.ThatAreSealed()
+```
+
+### Low-Level Access
+
+```csharp
+ctx.Types
+    .Where((INamedTypeSymbol symbol) => /* custom */)
+    .WithSyntax((TypeDeclarationSyntax syntax) => /* custom */)
+    .Where((TypeDeclarationSyntax syntax, INamedTypeSymbol symbol) => /* both */)
 ```
 
 ### Terminal Operations
@@ -269,151 +318,134 @@ ctx.Types
 // Basic - just the symbol
 .ForEach((INamedTypeSymbol type, SourceEmitter emit) => { ... });
 
-// With attribute data (requires .WithAttribute())
+// With single attribute
 .ForEach((INamedTypeSymbol type, AttributeMatch attr, SourceEmitter emit) => { ... });
 
-// With interface data (requires .Implementing())
+// With multiple attributes (WithAllAttributes)
+.ForEach((INamedTypeSymbol type, IReadOnlyList<AttributeMatch> attrs, SourceEmitter emit) => { ... });
+
+// With single interface
 .ForEach((INamedTypeSymbol type, InterfaceMatch iface, SourceEmitter emit) => { ... });
+
+// With multiple interfaces (ImplementingAll)
+.ForEach((INamedTypeSymbol type, IReadOnlyList<InterfaceMatch> ifaces, SourceEmitter emit) => { ... });
+
+// With both attribute AND interface
+.ForEach((INamedTypeSymbol type, AttributeMatch attr, InterfaceMatch iface, SourceEmitter emit) => { ... });
+
+// Collect all matches and process together
+.ForAll((IReadOnlyList<INamedTypeSymbol> types, CollectionEmitter emit) => { ... });
+
+// Collect with attributes
+.ForAll((IReadOnlyList<(INamedTypeSymbol, AttributeMatch)> items, CollectionEmitter emit) => { ... });
+```
+
+### Enums
+
+```csharp
+// TypeAccessibility - flags enum
+TypeAccessibility.Public
+TypeAccessibility.Internal
+TypeAccessibility.Private
+TypeAccessibility.Protected
+TypeAccessibility.ProtectedInternal
+TypeAccessibility.PrivateProtected
+TypeAccessibility.PublicOrInternal     // Combined
+TypeAccessibility.AnyProtected         // All protected variants
+TypeAccessibility.Any                  // All levels
+
+// TypeModifiers - flags enum
+TypeModifiers.Partial
+TypeModifiers.Static
+TypeModifiers.Abstract
+TypeModifiers.Sealed
+TypeModifiers.Readonly
+TypeModifiers.Ref
+
+// TypeKind - flags enum
+TypeKind.Class
+TypeKind.Struct
+TypeKind.RecordClass
+TypeKind.RecordStruct
+TypeKind.Interface
+TypeKind.Enum
+TypeKind.Delegate
+TypeKind.AnyClass          // Class | RecordClass
+TypeKind.AnyStruct         // Struct | RecordStruct
+TypeKind.AnyRecord         // RecordClass | RecordStruct
+TypeKind.AnyReferenceType  // Class | RecordClass | Interface | Delegate
+TypeKind.AnyValueType      // Struct | RecordStruct | Enum
 ```
 
 ### AttributeMatch
 
-Access attribute information easily:
-
 ```csharp
-// For generic attributes like MyAttribute<TValue, TOptions>
-var valueType = attr.TypeArgument(0);    // TValue
-var optionsType = attr.TypeArgument(1);  // TOptions
-var allTypeArgs = attr.TypeArguments;     // IReadOnlyList<ITypeSymbol>
+var valueType = attr.TypeArgument(0);           // Get type argument
+var allTypeArgs = attr.TypeArguments;           // IReadOnlyList<ITypeSymbol>
+attr.TryGetTypeArgument(0, out var type);       // Safe access
 
-// Constructor arguments
-var name = attr.ConstructorArgument(0);   // TypedConstant
-attr.TryGetConstructorArgument<string>(0, out var nameValue);
+var arg = attr.ConstructorArgument(0);          // TypedConstant
+attr.TryGetConstructorArgument<string>(0, out var value);
 
-// Named arguments
-var option = attr.NamedArgument("Option");
+var named = attr.NamedArgument("Option");       // TypedConstant?
 attr.TryGetNamedArgument<bool>("Enabled", out var enabled);
 
-// Raw access
-AttributeData data = attr.Data;
+AttributeData data = attr.Data;                 // Raw Roslyn type
 ```
 
 ### InterfaceMatch
 
-Access interface type arguments:
-
 ```csharp
-// For interfaces like IResultBase<TValue, TError>
-var tValue = iface.TypeArgument(0);
-var tError = iface.TypeArgument(1);
-var allTypeArgs = iface.TypeArguments;
+var tValue = iface.TypeArgument(0);             // Get type argument
+var allTypeArgs = iface.TypeArguments;          // IReadOnlyList<ITypeSymbol>
+iface.TryGetTypeArgument(0, out var type);      // Safe access
+
+string name = iface.Name;                       // "IMyInterface"
+string fullName = iface.FullName;               // "global::MyNamespace.IMyInterface"
+INamedTypeSymbol symbol = iface.Symbol;         // Raw Roslyn type
 
 // Extract variant types from nested interfaces
-var variants = InterfaceMatch.ExtractVariantTypes(tError, "Kurrent.IVariantException<");
-
-// Raw access
-INamedTypeSymbol symbol = iface.Symbol;
+var variants = InterfaceMatch.ExtractVariantTypes(errorType, "IVariantException<");
 ```
 
 ### SourceEmitter
 
-Emit generated source code:
-
 ```csharp
-// Simple emission
-emit.Source("MyType.g.cs", sourceCode);
+emit.Source("MyType.g.cs", sourceCode);                    // Simple emission
+emit.Source(sourceCode);                                    // Auto-named
+emit.Source(sourceCode, ".Operators");                      // With suffix
 
-// Auto-named based on type
-emit.Source(sourceCode);                    // MyNamespace_MyType.g.cs
-emit.Source(sourceCode, ".Operators");      // MyNamespace_MyType.Operators.g.cs
+emit.Source(new FileNamingOptions {
+    Prefix = "ValueObjects",
+    UseFoldersForPrefix = true,
+    UseFoldersForNamespace = true,
+    LowercasePath = false
+}, sourceCode, typeArgsForHash);
 
-// With file naming options
-emit.Source(
-    new FileNamingOptions
-    {
-        Prefix = "ValueObjects",            // Folder or prefix
-        UseFoldersForPrefix = true,         // ValueObjects/MyType_HASH.g.cs
-        UseFoldersForNamespace = true,      // ValueObjects/MyNamespace/MyType_HASH.g.cs
-        LowercasePath = false
-    },
-    sourceCode,
-    typeArgsForHash);                       // Additional types for hash uniqueness
+// Diagnostics
+emit.ReportInfo("GEN001", "Title", "Message");
+emit.ReportWarning("GEN002", "Title", "Message");
+emit.ReportError("GEN003", "Title", "Message");
 ```
 
 ### Symbol Extensions
 
-Convenient extensions on `INamedTypeSymbol`:
-
 ```csharp
-// Namespace
-type.GetNamespace()              // "MyNamespace" or ""
-type.GetNamespaceDeclaration()   // "namespace MyNamespace;" or "// Global namespace"
-type.GetNamespaceBlockStart()    // "namespace MyNamespace {"
-type.GetNamespaceBlockEnd()      // "}" or ""
-
-// Type names
-type.FullName()                  // "MyNamespace.MyType"
-type.GlobalName()                // "global::MyNamespace.MyType"
-type.SimpleName()                // "MyType"
-
-// Type declaration
-type.GetTypeKeyword()            // "record struct", "class", "interface", etc.
-type.GetAccessibility()          // "public", "internal", etc.
-type.GetModifiers()              // "public partial readonly"
-type.GetTypeDeclaration()        // "public partial record struct MyType"
-type.IsPartial()                 // true/false
-
-// Containing types (for nested types)
-type.GetContainingTypes()        // List from outermost to innermost
-type.GetContainingTypeDeclarations() // (declarations, closingBraces, indentLevel)
-
-// Finding attributes/interfaces
+type.GetNamespace()                  // "MyNamespace" or ""
+type.GetNamespaceDeclaration()       // "namespace MyNamespace;" or "// Global namespace"
+type.FullName()                      // "MyNamespace.MyType"
+type.GlobalName()                    // "global::MyNamespace.MyType"
+type.GetTypeKeyword()                // "record struct", "class", etc.
+type.GetAccessibility()              // "public", "internal", etc.
+type.GetModifiers()                  // "public partial readonly"
+type.GetTypeDeclaration()            // "public partial record struct MyType"
+type.IsPartial()                     // true/false
+type.GetContainingTypes()            // List from outermost to innermost
 type.FindAttribute("MyAttribute<>")
 type.HasAttribute("MyAttribute")
 type.FindInterface("IMyInterface<>")
 type.ImplementsInterface("IMyInterface")
 ```
-
-### Diagnostics
-
-Report diagnostics easily:
-
-```csharp
-emit.ReportInfo("GEN001", "Info", "Processing type...");
-emit.ReportWarning("GEN002", "Warning", "Consider using partial");
-emit.ReportError("GEN003", "Error", "Type must be partial");
-
-// With location from the type
-emit.ReportDiagnostic(DiagnosticSeverity.Error, "GEN004", "Error", "Details...");
-```
-
-### Post-Initialization Output
-
-Add marker attributes or other static source:
-
-```csharp
-protected override void Configure(GeneratorContext ctx)
-{
-    ctx.AddPostInitializationOutput("GenerateAttribute.g.cs", """
-        namespace MyNamespace;
-
-        [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct)]
-        public sealed class GenerateAttribute : Attribute { }
-        """);
-
-    ctx.Types
-        .WithAttribute("MyNamespace.GenerateAttribute")
-        .ForEach((type, emit) => { ... });
-}
-```
-
-## Design Principles
-
-1. **Expose Roslyn types** - `INamedTypeSymbol`, `ITypeSymbol`, `AttributeData` are used directly
-2. **Hide ceremony** - Syntax receivers, semantic transforms, incremental pipelines are internal
-3. **String interpolation templates** - Use C# raw string literals with `{{expression}}`
-4. **Automatic error handling** - Exceptions in ForEach are caught and reported as diagnostics
-5. **Modern .NET** - Uses `IIncrementalGenerator` for optimal IDE performance
 
 ## Project Structure
 
@@ -422,12 +454,20 @@ prototypes/fluent-source-gen/
 ├── src/
 │   └── FluentSourceGen/
 │       ├── FluentGenerator.cs      # Base class and GeneratorContext
-│       ├── TypeQuery.cs            # Fluent query builder
-│       ├── TypeFilter.cs           # Filter flags enum
+│       ├── TypeQuery.cs            # Fluent query builder (900+ lines)
+│       ├── TypeEnums.cs            # TypeAccessibility, TypeModifiers, TypeKind
 │       ├── AttributeMatch.cs       # Attribute data wrapper
 │       ├── InterfaceMatch.cs       # Interface data wrapper
 │       ├── SourceEmitter.cs        # Code emission and file naming
+│       ├── CollectionEmitter.cs    # Emitter for ForAll operations
 │       └── SymbolExtensions.cs     # INamedTypeSymbol extensions
+├── tests/
+│   └── FluentSourceGen.Tests/      # TUnit tests
+│       ├── TypeEnumsTests.cs
+│       ├── SymbolExtensionsTests.cs
+│       ├── TypeFilteringTests.cs
+│       ├── MatchWrapperTests.cs
+│       └── FileNamingTests.cs
 ├── FluentSourceGen.slnx            # Solution file
 └── README.md                       # This file
 ```
@@ -442,6 +482,7 @@ prototypes/fluent-source-gen/
 ```bash
 cd prototypes/fluent-source-gen
 dotnet build
+dotnet test
 ```
 
 Reference the built analyzer in your project:

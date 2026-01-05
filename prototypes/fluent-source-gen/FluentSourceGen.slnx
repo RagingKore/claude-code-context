@@ -1,1 +1,2 @@
 <Project Path="src/FluentSourceGen/FluentSourceGen.csproj" />
+<Project Path="tests/FluentSourceGen.Tests/FluentSourceGen.Tests.csproj" />
