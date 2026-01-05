@@ -47,36 +47,37 @@ public class OperationErrorGenerator : FluentGenerator
 
     protected override void Configure(GeneratorContext ctx)
     {
-        ctx.Types
+        var query = ctx.Types
             .ThatAreRecords()
             .ThatArePartial()
             .WithAttribute("Kurrent.GenerateOperationErrorAttribute")
-            .Implementing("Kurrent.IOperationError<>")
-            .Generate((type, attr, iface) =>
+            .Implementing("Kurrent.IOperationError<>");
+
+        ctx.Generate(query, (type, attr, iface) =>
+        {
+            var variants = iface.TypeArguments;
+
+            if (variants.Count == 0)
             {
-                var variants = iface.TypeArguments;
+                // TODO: Report diagnostic - for now, skip generation
+                return null;
+            }
 
-                if (variants.Count == 0)
+            var variantCode = GenerateVariantCode(type, variants);
+
+            return $$"""
+                {{type.GetNamespaceDeclaration()}}
+
+                {{type.GetModifiers()}} {{type.GetTypeKeyword()}} {{type.Name}}
                 {
-                    // TODO: Report diagnostic - for now, skip generation
-                    return null;
+                    private readonly object? _variant;
+
+                    private {{type.Name}}() { }
+
+                {{variantCode}}
                 }
-
-                var variantCode = GenerateVariantCode(type, variants);
-
-                return $$"""
-                    {{type.GetNamespaceDeclaration()}}
-
-                    {{type.GetModifiers()}} {{type.GetTypeKeyword()}} {{type.Name}}
-                    {
-                        private readonly object? _variant;
-
-                        private {{type.Name}}() { }
-
-                    {{variantCode}}
-                    }
-                    """;
-            });
+                """;
+        });
     }
 
     static string GenerateVariantCode(INamedTypeSymbol errorType, IReadOnlyList<ITypeSymbol> variants)

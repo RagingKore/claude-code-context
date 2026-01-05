@@ -32,26 +32,27 @@ public class ValueObjectGenerator : FluentGenerator
 
     protected override void Configure(GeneratorContext ctx)
     {
-        ctx.Types
+        var query = ctx.Types
             .ThatArePartial()
-            .WithAttribute("Kurrent.ValueObjectAttribute<>")
-            .Generate((type, attr) =>
-            {
-                var valueType = attr.TypeArgument(0);
+            .WithAttribute("Kurrent.ValueObjectAttribute<>");
 
-                return $$"""
-                    {{type.GetNamespaceDeclaration()}}
+        ctx.Generate(query, (type, attr) =>
+        {
+            var valueType = attr.TypeArgument(0);
 
-                    {{type.GetModifiers()}} {{type.GetTypeKeyword()}} {{type.Name}}
-                    {
-                        public {{valueType.FullName()}} Value { get; private init; }
+            return $$"""
+                {{type.GetNamespaceDeclaration()}}
 
-                        public static implicit operator {{valueType.FullName()}}({{type.Name}} _) => _.Value;
-                        public static implicit operator {{type.Name}}({{valueType.FullName()}} _) => new() { Value = _ };
+                {{type.GetModifiers()}} {{type.GetTypeKeyword()}} {{type.Name}}
+                {
+                    public {{valueType.FullName()}} Value { get; private init; }
 
-                        public override string ToString() => Value?.ToString() ?? string.Empty;
-                    }
-                    """;
-            });
+                    public static implicit operator {{valueType.FullName()}}({{type.Name}} _) => _.Value;
+                    public static implicit operator {{type.Name}}({{valueType.FullName()}} _) => new() { Value = _ };
+
+                    public override string ToString() => Value?.ToString() ?? string.Empty;
+                }
+                """;
+        });
     }
 }

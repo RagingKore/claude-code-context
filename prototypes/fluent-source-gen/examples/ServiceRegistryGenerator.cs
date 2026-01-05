@@ -32,40 +32,41 @@ public class ServiceRegistryGenerator : FluentGenerator
 {
     protected override void Configure(GeneratorContext ctx)
     {
-        ctx.Types
+        var query = ctx.Types
             .ThatAreClasses()
             .ThatAreNotAbstract()
             .ThatArePublic()
-            .WithAttribute("Kurrent.AutoRegisterAttribute")
-            .GenerateAll(types =>
-            {
-                var registrations = types
-                    .Select(item => GenerateRegistration(item.Symbol, item.Attribute))
-                    .ToList();
+            .WithAttribute("Kurrent.AutoRegisterAttribute");
 
-                var registrationCode = string.Join("\n            ", registrations);
+        ctx.GenerateAll(query, types =>
+        {
+            var registrations = types
+                .Select(item => GenerateRegistration(item.Symbol, item.Attribute))
+                .ToList();
 
-                return ("ServiceRegistry.g.cs", $$"""
-                    using Microsoft.Extensions.DependencyInjection;
+            var registrationCode = string.Join("\n            ", registrations);
 
-                    namespace Kurrent.Generated;
+            return ("ServiceRegistry.g.cs", $$"""
+                using Microsoft.Extensions.DependencyInjection;
 
+                namespace Kurrent.Generated;
+
+                /// <summary>
+                /// Auto-generated service registrations.
+                /// </summary>
+                public static class ServiceRegistry
+                {
                     /// <summary>
-                    /// Auto-generated service registrations.
+                    /// Registers all auto-discovered services.
                     /// </summary>
-                    public static class ServiceRegistry
+                    public static IServiceCollection AddGeneratedServices(this IServiceCollection services)
                     {
-                        /// <summary>
-                        /// Registers all auto-discovered services.
-                        /// </summary>
-                        public static IServiceCollection AddGeneratedServices(this IServiceCollection services)
-                        {
-                            {{registrationCode}}
-                            return services;
-                        }
+                        {{registrationCode}}
+                        return services;
                     }
-                    """);
-            });
+                }
+                """);
+        });
     }
 
     static string GenerateRegistration(INamedTypeSymbol type, AttributeMatch attr)
@@ -109,50 +110,51 @@ public class NamespacedServiceRegistryGenerator : FluentGenerator
 {
     protected override void Configure(GeneratorContext ctx)
     {
-        ctx.Types
+        var query = ctx.Types
             .ThatAreClasses()
             .ThatAreNotAbstract()
             .ThatArePublic()
             .WithAttribute("Kurrent.AutoRegisterAttribute")
-            .GroupByNamespace()
-            .Generate((ns, types) =>
+            .GroupByNamespace();
+
+        ctx.Generate(query, (ns, types) =>
+        {
+            if (string.IsNullOrEmpty(ns)) return null;
+
+            var registrations = types.Select(t =>
             {
-                if (string.IsNullOrEmpty(ns)) return null;
+                var serviceInterface = t.AllInterfaces
+                    .FirstOrDefault(i => !i.Name.StartsWith("IDisposable"));
 
-                var registrations = types.Select(t =>
-                {
-                    var serviceInterface = t.AllInterfaces
-                        .FirstOrDefault(i => !i.Name.StartsWith("IDisposable"));
-
-                    return serviceInterface is not null
-                        ? $"services.AddScoped<{serviceInterface.GlobalName()}, {t.GlobalName()}>();"
-                        : $"services.AddScoped<{t.GlobalName()}>();";
-                });
-
-                var registrationCode = string.Join("\n            ", registrations);
-                var className = ns.Split('.').Last() + "Services";
-                var hintName = SourceGeneratorFileNaming.GetNamespaceGroupHintName(ns, FileNamingOptions.Default);
-
-                return (hintName, $$"""
-                    using Microsoft.Extensions.DependencyInjection;
-
-                    namespace {{ns}};
-
-                    /// <summary>
-                    /// Auto-generated service registrations for {{ns}}.
-                    /// </summary>
-                    public static partial class {{className}}
-                    {
-                        /// <summary>
-                        /// Registers services from {{ns}}.
-                        /// </summary>
-                        public static IServiceCollection Add{{className}}(this IServiceCollection services)
-                        {
-                            {{registrationCode}}
-                            return services;
-                        }
-                    }
-                    """);
+                return serviceInterface is not null
+                    ? $"services.AddScoped<{serviceInterface.GlobalName()}, {t.GlobalName()}>();"
+                    : $"services.AddScoped<{t.GlobalName()}>();";
             });
+
+            var registrationCode = string.Join("\n            ", registrations);
+            var className = ns.Split('.').Last() + "Services";
+            var hintName = SourceGeneratorFileNaming.GetNamespaceGroupHintName(ns, FileNamingOptions.Default);
+
+            return (hintName, $$"""
+                using Microsoft.Extensions.DependencyInjection;
+
+                namespace {{ns}};
+
+                /// <summary>
+                /// Auto-generated service registrations for {{ns}}.
+                /// </summary>
+                public static partial class {{className}}
+                {
+                    /// <summary>
+                    /// Registers services from {{ns}}.
+                    /// </summary>
+                    public static IServiceCollection Add{{className}}(this IServiceCollection services)
+                    {
+                        {{registrationCode}}
+                        return services;
+                    }
+                }
+                """);
+        });
     }
 }
