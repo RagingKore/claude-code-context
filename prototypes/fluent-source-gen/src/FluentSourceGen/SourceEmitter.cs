@@ -23,13 +23,9 @@ public sealed class SourceEmitter
     /// </summary>
     public INamedTypeSymbol Type => _typeSymbol;
 
-    #region Source Emission
-
     /// <summary>
     /// Emits source code with a simple hint name.
     /// </summary>
-    /// <param name="hintName">The hint name for the generated file (e.g., "MyType.g.cs")</param>
-    /// <param name="source">The source code to emit</param>
     public void Source(string hintName, string source)
     {
         var normalizedSource = NormalizeSource(source);
@@ -37,63 +33,16 @@ public sealed class SourceEmitter
     }
 
     /// <summary>
-    /// Emits source code with automatic hint name generation based on the type.
-    /// </summary>
-    /// <param name="suffix">Optional suffix to append to the type name (e.g., ".Operators")</param>
-    /// <param name="source">The source code to emit</param>
-    public void Source(string source, string? suffix = null)
-    {
-        var hintName = GenerateHintName(_typeSymbol, suffix);
-        Source(hintName, source);
-    }
-
-    /// <summary>
     /// Emits source code with configurable file naming options.
     /// </summary>
-    /// <param name="options">File naming configuration</param>
-    /// <param name="source">The source code to emit</param>
-    /// <param name="typeArgsForHash">Optional type arguments to include in hash for uniqueness</param>
     public void Source(FileNamingOptions options, string source, params ITypeSymbol[] typeArgsForHash)
     {
-        var hintName = GenerateHintName(_typeSymbol, options, typeArgsForHash);
+        var hintName = SourceGeneratorFileNaming.GetHintName(_typeSymbol, options, typeArgsForHash);
         Source(hintName, source);
     }
-
-    #endregion
-
-    #region Hint Name Generation
-
-    /// <summary>
-    /// Generates a hint name for the type with optional suffix.
-    /// </summary>
-    [Obsolete("Use SourceGeneratorFileNaming.GetHintName instead")]
-    public static string GenerateHintName(INamedTypeSymbol typeSymbol, string? suffix = null)
-    {
-        var hintName = SourceGeneratorFileNaming.GetHintName(typeSymbol, new FileNamingOptions { IncludeHash = false });
-        return suffix is not null
-            ? hintName.Replace(".g.cs", $"{suffix}.g.cs")
-            : hintName;
-    }
-
-    /// <summary>
-    /// Generates a deterministic hint name with configurable options.
-    /// </summary>
-    [Obsolete("Use SourceGeneratorFileNaming.GetHintName instead")]
-    public static string GenerateHintName(
-        INamedTypeSymbol typeSymbol,
-        FileNamingOptions options,
-        IEnumerable<ITypeSymbol>? typeArgsForHash = null)
-    {
-        return SourceGeneratorFileNaming.GetHintName(typeSymbol, options, typeArgsForHash);
-    }
-
-    #endregion
-
-    #region Source Helpers
 
     static string NormalizeSource(string source)
     {
-        // Ensure the source has the auto-generated header if not present
         if (!source.TrimStart().StartsWith("//"))
         {
             return $"""
@@ -109,10 +58,6 @@ public sealed class SourceEmitter
 
         return source;
     }
-
-    #endregion
-
-    #region Diagnostics
 
     /// <summary>
     /// Reports an informational diagnostic.
@@ -158,8 +103,4 @@ public sealed class SourceEmitter
             severity, isEnabledByDefault: true);
         _context.ReportDiagnostic(Diagnostic.Create(descriptor, location));
     }
-
-    #endregion
 }
-
-// Note: FileNamingOptions is defined in SourceGeneratorFileNaming.cs

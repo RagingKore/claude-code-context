@@ -49,13 +49,10 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
         _diagnostics = diagnostics;
     }
 
-    #region Generate Methods
-
     /// <summary>
     /// Generate source code for each group.
     /// Return (hintName, source) tuple, or null to skip generation for that group.
     /// </summary>
-    /// <param name="generator">Function that receives the group key, types, and returns (hintName, source) or null</param>
     public void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
         var keySelector = _keySelector;
@@ -191,141 +188,11 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
         });
     }
 
-    #endregion
-
-    #region ForEachGroup Methods (Legacy)
-
-    /// <summary>
-    /// Process each group of types. Each group shares the same key value.
-    /// </summary>
-    /// <param name="action">Action to execute for each group with key, types, and emitter.</param>
-    [Obsolete("Use Generate instead")]
-    public void ForEachGroup(Action<TKey, IReadOnlyList<INamedTypeSymbol>, CollectionEmitter> action)
-    {
-        var keySelector = _keySelector;
-        var comparer = _comparer;
-
-        var collected = _provider.Collect();
-
-        _context.RegisterSourceOutput(collected, (spc, results) =>
-        {
-            var symbols = results
-                .Where(r => r.Symbol is not null)
-                .Select(r => r.Symbol!)
-                .ToList();
-
-            if (symbols.Count == 0) return;
-
-            var groups = symbols
-                .GroupBy(keySelector, comparer)
-                .ToList();
-
-            var emitter = new CollectionEmitter(spc);
-
-            foreach (var group in groups)
-            {
-                try
-                {
-                    action(group.Key, group.ToList(), emitter);
-                }
-                catch (Exception ex)
-                {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
-                }
-            }
-        });
-    }
-
-    /// <summary>
-    /// Process each group with attribute data.
-    /// </summary>
-    [Obsolete("Use Generate instead")]
-    public void ForEachGroup(Action<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, CollectionEmitter> action)
-    {
-        var keySelector = _keySelector;
-        var comparer = _comparer;
-
-        var collected = _provider.Collect();
-
-        _context.RegisterSourceOutput(collected, (spc, results) =>
-        {
-            var items = results
-                .Where(r => r.Symbol is not null && r.Attributes.Count > 0)
-                .Select(r => (Symbol: r.Symbol!, Attribute: new AttributeMatch(r.Attributes[0])))
-                .ToList();
-
-            if (items.Count == 0) return;
-
-            var groups = items
-                .GroupBy(x => keySelector(x.Symbol), comparer)
-                .ToList();
-
-            var emitter = new CollectionEmitter(spc);
-
-            foreach (var group in groups)
-            {
-                try
-                {
-                    action(group.Key, group.ToList(), emitter);
-                }
-                catch (Exception ex)
-                {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
-                }
-            }
-        });
-    }
-
-    /// <summary>
-    /// Process each group with interface data.
-    /// </summary>
-    [Obsolete("Use Generate instead")]
-    public void ForEachGroup(Action<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, InterfaceMatch Interface)>, CollectionEmitter> action)
-    {
-        var keySelector = _keySelector;
-        var comparer = _comparer;
-
-        var collected = _provider.Collect();
-
-        _context.RegisterSourceOutput(collected, (spc, results) =>
-        {
-            var items = results
-                .Where(r => r.Symbol is not null && r.Interfaces.Count > 0)
-                .Select(r => (Symbol: r.Symbol!, Interface: new InterfaceMatch(r.Interfaces[0])))
-                .ToList();
-
-            if (items.Count == 0) return;
-
-            var groups = items
-                .GroupBy(x => keySelector(x.Symbol), comparer)
-                .ToList();
-
-            var emitter = new CollectionEmitter(spc);
-
-            foreach (var group in groups)
-            {
-                try
-                {
-                    action(group.Key, group.ToList(), emitter);
-                }
-                catch (Exception ex)
-                {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
-                }
-            }
-        });
-    }
-
-    #endregion
-
-    #region Filtering and Ordering
-
     /// <summary>
     /// Filter groups by a predicate on the key.
     /// </summary>
     public GroupedTypeQuery<TKey> WhereGroup(Func<TKey, bool> predicate)
     {
-        // Return a new grouped query that filters groups
         return new FilteredGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, _fileNaming, _diagnostics, predicate);
     }
 
@@ -345,13 +212,6 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
         return new OrderedGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, _fileNaming, _diagnostics, ascending: false);
     }
 
-    #endregion
-
-    #region Helper Methods
-
-    /// <summary>
-    /// Normalizes source code by adding standard headers if not present.
-    /// </summary>
     static string NormalizeSource(string source)
     {
         if (!source.TrimStart().StartsWith("//"))
@@ -369,8 +229,6 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
 
         return source;
     }
-
-    #endregion
 }
 
 /// <summary>
@@ -446,48 +304,6 @@ internal sealed class FilteredGroupedTypeQuery<TKey> : GroupedTypeQuery<TKey> wh
                         Location.None,
                         $"group '{group.Key}'",
                         ex.Message));
-                }
-            }
-        });
-    }
-
-    /// <summary>
-    /// Process each group that passes the filter.
-    /// </summary>
-    [Obsolete("Use Generate instead")]
-    public new void ForEachGroup(Action<TKey, IReadOnlyList<INamedTypeSymbol>, CollectionEmitter> action)
-    {
-        var keySelector = _keySelector;
-        var comparer = _comparer;
-        var groupPredicate = _groupPredicate;
-
-        var collected = _provider.Collect();
-
-        _context.RegisterSourceOutput(collected, (spc, results) =>
-        {
-            var symbols = results
-                .Where(r => r.Symbol is not null)
-                .Select(r => r.Symbol!)
-                .ToList();
-
-            if (symbols.Count == 0) return;
-
-            var groups = symbols
-                .GroupBy(keySelector, comparer)
-                .Where(g => groupPredicate(g.Key))
-                .ToList();
-
-            var emitter = new CollectionEmitter(spc);
-
-            foreach (var group in groups)
-            {
-                try
-                {
-                    action(group.Key, group.ToList(), emitter);
-                }
-                catch (Exception ex)
-                {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
                 }
             }
         });
@@ -585,49 +401,6 @@ public sealed class OrderedGroupedTypeQuery<TKey> where TKey : notnull
                         Location.None,
                         $"group '{group.Key}'",
                         ex.Message));
-                }
-            }
-        });
-    }
-
-    /// <summary>
-    /// Process each group in order.
-    /// </summary>
-    [Obsolete("Use Generate instead")]
-    public void ForEachGroup(Action<TKey, IReadOnlyList<INamedTypeSymbol>, CollectionEmitter> action)
-    {
-        var keySelector = _keySelector;
-        var comparer = _comparer;
-        var ascending = _ascending;
-
-        var collected = _provider.Collect();
-
-        _context.RegisterSourceOutput(collected, (spc, results) =>
-        {
-            var symbols = results
-                .Where(r => r.Symbol is not null)
-                .Select(r => r.Symbol!)
-                .ToList();
-
-            if (symbols.Count == 0) return;
-
-            var rawGroups = symbols.GroupBy(keySelector, comparer);
-
-            var groups = ascending
-                ? rawGroups.OrderBy(g => g.Key).ToList()
-                : rawGroups.OrderByDescending(g => g.Key).ToList();
-
-            var emitter = new CollectionEmitter(spc);
-
-            foreach (var group in groups)
-            {
-                try
-                {
-                    action(group.Key, group.ToList(), emitter);
-                }
-                catch (Exception ex)
-                {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
                 }
             }
         });
