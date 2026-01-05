@@ -29,6 +29,7 @@ public abstract class FluentGenerator : IIncrementalGenerator
     {
         var generatorContext = new GeneratorContext(context, FileNaming, DiagnosticIdPrefix);
         Configure(generatorContext);
+        generatorContext.ExecuteAllRegistrations();
     }
 
     /// <summary>
@@ -45,6 +46,7 @@ public abstract class FluentGenerator : IIncrementalGenerator
 public sealed class GeneratorContext
 {
     readonly IncrementalGeneratorInitializationContext _context;
+    readonly List<Action> _registrations = [];
 
     internal GeneratorContext(
         IncrementalGeneratorInitializationContext context,
@@ -73,9 +75,9 @@ public sealed class GeneratorContext
 
     /// <summary>
     /// Starts a fluent query to find and process types.
-    /// This returns a pure query object - use Generate methods to emit source.
+    /// Chain filter methods and call Generate() to emit source code.
     /// </summary>
-    public TypeQuery Types => new(_context.SyntaxProvider);
+    public TypeQuery Types => new(_context.SyntaxProvider, this);
 
     /// <summary>
     /// Registers a post-initialization output (e.g., marker attributes).
@@ -88,20 +90,34 @@ public sealed class GeneratorContext
             ctx.AddSource(hintName, source));
     }
 
-    #region Generate Methods for TypeQuery
+    /// <summary>
+    /// Enqueues a registration action to be executed after Configure() completes.
+    /// This is called internally by query Generate() methods.
+    /// </summary>
+    internal void EnqueueRegistration(Action registration)
+    {
+        _registrations.Add(registration);
+    }
 
     /// <summary>
-    /// Generate source code for each matching type.
+    /// Executes all queued registrations.
+    /// Called by FluentGenerator after Configure() completes.
     /// </summary>
-    /// <param name="query">The type query to generate from.</param>
-    /// <param name="generator">Function that receives the type and returns source code (or null to skip).</param>
-    /// <param name="suffix">Optional suffix for the generated file name.</param>
-    public void Generate(
-        TypeQuery query,
-        Func<INamedTypeSymbol, string?> generator,
-        string? suffix = null)
+    internal void ExecuteAllRegistrations()
     {
-        var provider = query.Build();
+        foreach (var registration in _registrations)
+        {
+            registration();
+        }
+    }
+
+    #region Internal Registration Helpers
+
+    internal void RegisterTypeQueryOutput(
+        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
+        Func<INamedTypeSymbol, string?> generator,
+        string? suffix)
+    {
         var fileNaming = FileNaming;
         var diagnostics = Diagnostics;
 
@@ -133,15 +149,11 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Generate source code for each matching type with attribute data.
-    /// </summary>
-    public void Generate(
-        TypeQuery query,
+    internal void RegisterTypeQueryWithAttributeOutput(
+        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, AttributeMatch, string?> generator,
-        string? suffix = null)
+        string? suffix)
     {
-        var provider = query.Build();
         var fileNaming = FileNaming;
         var diagnostics = Diagnostics;
 
@@ -173,15 +185,11 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Generate source code for each matching type with interface data.
-    /// </summary>
-    public void Generate(
-        TypeQuery query,
+    internal void RegisterTypeQueryWithInterfaceOutput(
+        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, InterfaceMatch, string?> generator,
-        string? suffix = null)
+        string? suffix)
     {
-        var provider = query.Build();
         var fileNaming = FileNaming;
         var diagnostics = Diagnostics;
 
@@ -213,15 +221,11 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Generate source code for each matching type with both attribute and interface data.
-    /// </summary>
-    public void Generate(
-        TypeQuery query,
+    internal void RegisterTypeQueryWithBothOutput(
+        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, AttributeMatch, InterfaceMatch, string?> generator,
-        string? suffix = null)
+        string? suffix)
     {
-        var provider = query.Build();
         var fileNaming = FileNaming;
         var diagnostics = Diagnostics;
 
@@ -253,17 +257,13 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Collect all matching types and generate a single source file.
-    /// </summary>
-    public void GenerateAll(
-        TypeQuery query,
+    internal void RegisterCollectedTypeQueryOutput(
+        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
-        var provider = query.Build().Collect();
         var diagnostics = Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, results) =>
+        _context.RegisterSourceOutput(provider.Collect(), (spc, results) =>
         {
             var symbols = results.Where(r => r.Symbol is not null).Select(r => r.Symbol!).ToList();
             if (symbols.Count == 0) return;
@@ -287,17 +287,13 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Collect all matching types with attribute data and generate a single source file.
-    /// </summary>
-    public void GenerateAll(
-        TypeQuery query,
+    internal void RegisterCollectedTypeQueryWithAttributeOutput(
+        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
     {
-        var provider = query.Build().Collect();
         var diagnostics = Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, results) =>
+        _context.RegisterSourceOutput(provider.Collect(), (spc, results) =>
         {
             var items = results
                 .Where(r => r.Symbol is not null && r.Attributes.Count > 0)
@@ -325,18 +321,10 @@ public sealed class GeneratorContext
         });
     }
 
-    #endregion
-
-    #region Generate Methods for GroupedTypeQuery
-
-    /// <summary>
-    /// Generate source code for each group of types.
-    /// </summary>
-    public void Generate<TKey>(
-        GroupedTypeQuery<TKey> query,
+    internal void RegisterGroupedTypeQueryOutput<TKey>(
+        IncrementalValueProvider<GroupedQueryResult<TKey>> provider,
         Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator) where TKey : notnull
     {
-        var provider = query.Build();
         var diagnostics = Diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, groupedResult) =>
@@ -363,14 +351,10 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Generate source code for each group with attribute data.
-    /// </summary>
-    public void Generate<TKey>(
-        GroupedTypeQuery<TKey> query,
+    internal void RegisterGroupedTypeQueryWithAttributeOutput<TKey>(
+        IncrementalValueProvider<GroupedQueryResult<TKey>> provider,
         Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator) where TKey : notnull
     {
-        var provider = query.Build();
         var diagnostics = Diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, groupedResult) =>
@@ -397,19 +381,11 @@ public sealed class GeneratorContext
         });
     }
 
-    #endregion
-
-    #region Generate Methods for Projected Queries
-
-    /// <summary>
-    /// Generate source code for each projected item.
-    /// </summary>
-    public void Generate<T>(
-        ProjectedTypeQuery<T> query,
+    internal void RegisterProjectedTypeQueryOutput<T>(
+        IncrementalValuesProvider<ProjectedItem<T>> provider,
         Func<T, INamedTypeSymbol, string?> generator,
-        string? suffix = null)
+        string? suffix)
     {
-        var provider = query.Build();
         var fileNaming = FileNaming;
         var diagnostics = Diagnostics;
 
@@ -441,14 +417,10 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Generate source code from all projected items collected together.
-    /// </summary>
-    public void GenerateAll<T>(
-        ProjectedTypeQuery<T> query,
+    internal void RegisterCollectedProjectedOutput<T>(
+        IncrementalValueProvider<IReadOnlyList<ProjectedItem<T>>> provider,
         Func<IReadOnlyList<T>, (string HintName, string Source)?> generator)
     {
-        var provider = query.BuildCollected();
         var diagnostics = Diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, items) =>
@@ -475,14 +447,10 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Generate source code from all projected items with their source symbols.
-    /// </summary>
-    public void GenerateAll<T>(
-        ProjectedTypeQuery<T> query,
+    internal void RegisterCollectedProjectedWithSymbolOutput<T>(
+        IncrementalValueProvider<IReadOnlyList<ProjectedItem<T>>> provider,
         Func<IReadOnlyList<(T Value, INamedTypeSymbol Symbol)>, (string HintName, string Source)?> generator)
     {
-        var provider = query.BuildCollected();
         var diagnostics = Diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, items) =>
@@ -513,14 +481,10 @@ public sealed class GeneratorContext
         });
     }
 
-    /// <summary>
-    /// Generate source code for each projected group.
-    /// </summary>
-    public void Generate<TKey, T>(
-        ProjectedGroupedQuery<TKey, T> query,
+    internal void RegisterProjectedGroupedOutput<TKey, T>(
+        IncrementalValueProvider<ProjectedGroupedResult<TKey, T>> provider,
         Func<TKey, IReadOnlyList<T>, (string HintName, string Source)?> generator) where TKey : notnull
     {
-        var provider = query.Build();
         var diagnostics = Diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, groupedResult) =>
@@ -547,18 +511,10 @@ public sealed class GeneratorContext
         });
     }
 
-    #endregion
-
-    #region Generate Methods for Flattened Queries
-
-    /// <summary>
-    /// Generate source code from all flattened items collected together.
-    /// </summary>
-    public void GenerateAll<T>(
-        FlattenedTypeQuery<T> query,
+    internal void RegisterFlattenedTypeQueryOutput<T>(
+        IncrementalValueProvider<IReadOnlyList<FlattenedItem<T>>> provider,
         Func<IReadOnlyList<FlattenedItem<T>>, (string HintName, string Source)?> generator)
     {
-        var provider = query.BuildCollected();
         var diagnostics = Diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, items) =>
@@ -588,7 +544,7 @@ public sealed class GeneratorContext
 
     #region Helpers
 
-    static string NormalizeSource(string source)
+    internal static string NormalizeSource(string source)
     {
         if (!source.TrimStart().StartsWith("//"))
         {

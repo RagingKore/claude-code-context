@@ -4,14 +4,14 @@ namespace FluentSourceGen;
 
 /// <summary>
 /// Represents types grouped by a key selector.
-/// This is a pure query object - it contains no emission logic.
-/// Use <see cref="Build"/> to get the provider, then pass to GeneratorContext for emission.
+/// Chain filter methods and call Generate() to emit source code.
 /// </summary>
 /// <typeparam name="TKey">The type of the grouping key.</typeparam>
 public sealed class GroupedTypeQuery<TKey> where TKey : notnull
 {
     readonly IncrementalValuesProvider<TypeQuery.QueryResult> _provider;
     readonly Func<INamedTypeSymbol, TKey> _keySelector;
+    readonly GeneratorContext _context;
     readonly IEqualityComparer<TKey> _comparer;
     readonly Func<TKey, bool>? _groupPredicate;
     readonly bool? _orderAscending;
@@ -19,12 +19,14 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     internal GroupedTypeQuery(
         IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, TKey> keySelector,
+        GeneratorContext context,
         IEqualityComparer<TKey>? comparer = null,
         Func<TKey, bool>? groupPredicate = null,
         bool? orderAscending = null)
     {
         _provider = provider;
         _keySelector = keySelector;
+        _context = context;
         _comparer = comparer ?? EqualityComparer<TKey>.Default;
         _groupPredicate = groupPredicate;
         _orderAscending = orderAscending;
@@ -35,7 +37,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public GroupedTypeQuery<TKey> WhereGroup(Func<TKey, bool> predicate)
     {
-        return new GroupedTypeQuery<TKey>(_provider, _keySelector, _comparer, predicate, _orderAscending);
+        return new GroupedTypeQuery<TKey>(_provider, _keySelector, _context, _comparer, predicate, _orderAscending);
     }
 
     /// <summary>
@@ -43,7 +45,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public GroupedTypeQuery<TKey> OrderByKey()
     {
-        return new GroupedTypeQuery<TKey>(_provider, _keySelector, _comparer, _groupPredicate, ascending: true);
+        return new GroupedTypeQuery<TKey>(_provider, _keySelector, _context, _comparer, _groupPredicate, ascending: true);
     }
 
     /// <summary>
@@ -51,12 +53,38 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public GroupedTypeQuery<TKey> OrderByKeyDescending()
     {
-        return new GroupedTypeQuery<TKey>(_provider, _keySelector, _comparer, _groupPredicate, ascending: false);
+        return new GroupedTypeQuery<TKey>(_provider, _keySelector, _context, _comparer, _groupPredicate, ascending: false);
+    }
+
+    #region Generate Methods (Terminal Operations)
+
+    /// <summary>
+    /// Generate source code for each group of types.
+    /// </summary>
+    public void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        _context.EnqueueRegistration(() =>
+            _context.RegisterGroupedTypeQueryOutput(provider, generator));
     }
 
     /// <summary>
+    /// Generate source code for each group with attribute data.
+    /// </summary>
+    public void Generate(Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        _context.EnqueueRegistration(() =>
+            _context.RegisterGroupedTypeQueryWithAttributeOutput(provider, generator));
+    }
+
+    #endregion
+
+    #region Build Method
+
+    /// <summary>
     /// Builds the query and returns the grouped incremental value provider.
-    /// Pass this to GeneratorContext.GenerateGrouped() to emit source.
+    /// For advanced scenarios only - prefer using Generate() methods.
     /// </summary>
     public IncrementalValueProvider<GroupedQueryResult<TKey>> Build()
     {
@@ -75,6 +103,8 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
             return new GroupedQueryResult<TKey>(symbols, keySelector, comparer, groupPredicate, orderAscending);
         });
     }
+
+    #endregion
 }
 
 /// <summary>

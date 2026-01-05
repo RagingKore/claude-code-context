@@ -7,12 +7,12 @@ namespace FluentSourceGen;
 
 /// <summary>
 /// Fluent query builder for filtering types in a compilation.
-/// This is a pure query object - it contains no emission logic.
-/// Use <see cref="Build"/> to get the provider, then pass to GeneratorContext for emission.
+/// Chain filter methods and call Generate() to emit source code.
 /// </summary>
 public sealed class TypeQuery
 {
     readonly SyntaxValueProvider _syntaxProvider;
+    readonly GeneratorContext _context;
     readonly List<Func<SyntaxNode, bool>> _syntaxPredicates = [];
     readonly List<Func<INamedTypeSymbol, bool>> _semanticPredicates = [];
     readonly List<string> _attributePatterns = [];
@@ -24,9 +24,10 @@ public sealed class TypeQuery
     bool _requireAllAttributes;
     bool _requireAllInterfaces;
 
-    internal TypeQuery(SyntaxValueProvider syntaxProvider)
+    internal TypeQuery(SyntaxValueProvider syntaxProvider, GeneratorContext context)
     {
         _syntaxProvider = syntaxProvider;
+        _context = context;
     }
 
     void ApplyPredicate(Func<INamedTypeSymbol, bool> predicate)
@@ -1081,7 +1082,7 @@ public sealed class TypeQuery
     /// </summary>
     public GroupedTypeQuery<TKey> GroupBy<TKey>(Func<INamedTypeSymbol, TKey> keySelector) where TKey : notnull
     {
-        return new GroupedTypeQuery<TKey>(Build(), keySelector);
+        return new GroupedTypeQuery<TKey>(Build(), keySelector, _context);
     }
 
     /// <summary>
@@ -1089,7 +1090,7 @@ public sealed class TypeQuery
     /// </summary>
     public GroupedTypeQuery<TKey> GroupBy<TKey>(Func<INamedTypeSymbol, TKey> keySelector, IEqualityComparer<TKey> comparer) where TKey : notnull
     {
-        return new GroupedTypeQuery<TKey>(Build(), keySelector, comparer);
+        return new GroupedTypeQuery<TKey>(Build(), keySelector, _context, comparer);
     }
 
     /// <summary>
@@ -1125,7 +1126,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(projected);
+        return new ProjectedTypeQuery<T>(projected, _context);
     }
 
     /// <summary>
@@ -1142,7 +1143,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new AttributeMatch(result.Attributes[0])))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(projected);
+        return new ProjectedTypeQuery<T>(projected, _context);
     }
 
     /// <summary>
@@ -1159,7 +1160,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new InterfaceMatch(result.Interfaces[0])))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(projected);
+        return new ProjectedTypeQuery<T>(projected, _context);
     }
 
     /// <summary>
@@ -1177,7 +1178,7 @@ public sealed class TypeQuery
                 .Select(value => new FlattenedItem<T>(result.Symbol, value));
         });
 
-        return new FlattenedTypeQuery<T>(flattened);
+        return new FlattenedTypeQuery<T>(flattened, _context);
     }
 
     /// <summary>
@@ -1198,16 +1199,82 @@ public sealed class TypeQuery
                 .Select(value => new FlattenedItem<T>(result.Symbol, value));
         });
 
-        return new FlattenedTypeQuery<T>(flattened);
+        return new FlattenedTypeQuery<T>(flattened, _context);
     }
 
     #endregion
 
-    #region Terminal Operation
+    #region Generate Methods (Terminal Operations)
+
+    /// <summary>
+    /// Generate source code for each matching type.
+    /// </summary>
+    /// <param name="generator">Function that receives the type and returns source code (or null to skip).</param>
+    /// <param name="suffix">Optional suffix for the generated file name.</param>
+    public void Generate(Func<INamedTypeSymbol, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        _context.EnqueueRegistration(() =>
+            _context.RegisterTypeQueryOutput(provider, generator, suffix));
+    }
+
+    /// <summary>
+    /// Generate source code for each matching type with attribute data.
+    /// </summary>
+    public void Generate(Func<INamedTypeSymbol, AttributeMatch, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        _context.EnqueueRegistration(() =>
+            _context.RegisterTypeQueryWithAttributeOutput(provider, generator, suffix));
+    }
+
+    /// <summary>
+    /// Generate source code for each matching type with interface data.
+    /// </summary>
+    public void Generate(Func<INamedTypeSymbol, InterfaceMatch, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        _context.EnqueueRegistration(() =>
+            _context.RegisterTypeQueryWithInterfaceOutput(provider, generator, suffix));
+    }
+
+    /// <summary>
+    /// Generate source code for each matching type with both attribute and interface data.
+    /// </summary>
+    public void Generate(Func<INamedTypeSymbol, AttributeMatch, InterfaceMatch, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        _context.EnqueueRegistration(() =>
+            _context.RegisterTypeQueryWithBothOutput(provider, generator, suffix));
+    }
+
+    /// <summary>
+    /// Collect all matching types and generate a single source file.
+    /// </summary>
+    public void GenerateAll(Func<IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        _context.EnqueueRegistration(() =>
+            _context.RegisterCollectedTypeQueryOutput(provider, generator));
+    }
+
+    /// <summary>
+    /// Collect all matching types with attribute data and generate a single source file.
+    /// </summary>
+    public void GenerateAll(Func<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        _context.EnqueueRegistration(() =>
+            _context.RegisterCollectedTypeQueryWithAttributeOutput(provider, generator));
+    }
+
+    #endregion
+
+    #region Build Method
 
     /// <summary>
     /// Builds the query and returns the incremental values provider.
-    /// Pass this to GeneratorContext.Generate() methods to emit source.
+    /// For advanced scenarios only - prefer using Generate() methods.
     /// </summary>
     public IncrementalValuesProvider<QueryResult> Build()
     {

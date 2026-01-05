@@ -35,7 +35,7 @@ public class HandlerRegistryGenerator : FluentGenerator
     protected override void Configure(GeneratorContext ctx)
     {
         // Project handlers to extract their handler type and interface
-        var query = ctx.Types
+        ctx.Types
             .ThatAreClasses()
             .ThatAreNotAbstract()
             .ImplementingAny("Kurrent.ICommandHandler<>", "Kurrent.IQueryHandler<>")
@@ -45,53 +45,52 @@ public class HandlerRegistryGenerator : FluentGenerator
                 CommandInterface = type.FindInterface("Kurrent.ICommandHandler<>"),
                 QueryInterface = type.FindInterface("Kurrent.IQueryHandler<>"),
                 IsCommand = type.ImplementsInterface("Kurrent.ICommandHandler<>")
-            });
+            })
+            .GenerateAll(handlers =>
+            {
+                var commandHandlers = handlers
+                    .Where(h => h.IsCommand && h.CommandInterface is not null)
+                    .Select(h => $"services.AddScoped<{h.CommandInterface!.GlobalName()}, {h.Type.GlobalName()}>();")
+                    .ToList();
 
-        ctx.GenerateAll(query, handlers =>
-        {
-            var commandHandlers = handlers
-                .Where(h => h.IsCommand && h.CommandInterface is not null)
-                .Select(h => $"services.AddScoped<{h.CommandInterface!.GlobalName()}, {h.Type.GlobalName()}>();")
-                .ToList();
+                var queryHandlers = handlers
+                    .Where(h => !h.IsCommand && h.QueryInterface is not null)
+                    .Select(h => $"services.AddScoped<{h.QueryInterface!.GlobalName()}, {h.Type.GlobalName()}>();")
+                    .ToList();
 
-            var queryHandlers = handlers
-                .Where(h => !h.IsCommand && h.QueryInterface is not null)
-                .Select(h => $"services.AddScoped<{h.QueryInterface!.GlobalName()}, {h.Type.GlobalName()}>();")
-                .ToList();
+                var commandCode = commandHandlers.Count > 0
+                    ? "// Command Handlers\n            " + string.Join("\n            ", commandHandlers)
+                    : "// No command handlers found";
 
-            var commandCode = commandHandlers.Count > 0
-                ? "// Command Handlers\n            " + string.Join("\n            ", commandHandlers)
-                : "// No command handlers found";
+                var queryCode = queryHandlers.Count > 0
+                    ? "// Query Handlers\n            " + string.Join("\n            ", queryHandlers)
+                    : "// No query handlers found";
 
-            var queryCode = queryHandlers.Count > 0
-                ? "// Query Handlers\n            " + string.Join("\n            ", queryHandlers)
-                : "// No query handlers found";
+                return ("HandlerRegistry.g.cs", $$"""
+                    using Microsoft.Extensions.DependencyInjection;
 
-            return ("HandlerRegistry.g.cs", $$"""
-                using Microsoft.Extensions.DependencyInjection;
+                    namespace Kurrent.Generated;
 
-                namespace Kurrent.Generated;
-
-                /// <summary>
-                /// Auto-generated handler registry for CQRS pattern.
-                /// Found {{commandHandlers.Count}} command handlers and {{queryHandlers.Count}} query handlers.
-                /// </summary>
-                public static class HandlerRegistry
-                {
                     /// <summary>
-                    /// Registers all discovered command and query handlers.
+                    /// Auto-generated handler registry for CQRS pattern.
+                    /// Found {{commandHandlers.Count}} command handlers and {{queryHandlers.Count}} query handlers.
                     /// </summary>
-                    public static IServiceCollection AddHandlers(this IServiceCollection services)
+                    public static class HandlerRegistry
                     {
-                        {{commandCode}}
+                        /// <summary>
+                        /// Registers all discovered command and query handlers.
+                        /// </summary>
+                        public static IServiceCollection AddHandlers(this IServiceCollection services)
+                        {
+                            {{commandCode}}
 
-                        {{queryCode}}
+                            {{queryCode}}
 
-                        return services;
+                            return services;
+                        }
                     }
-                }
-                """);
-        });
+                    """);
+            });
     }
 }
 
@@ -104,7 +103,7 @@ public class FlattenedHandlerRegistryGenerator : FluentGenerator
     protected override void Configure(GeneratorContext ctx)
     {
         // Use SelectMany to extract all handler interfaces from all types
-        var query = ctx.Types
+        ctx.Types
             .ThatAreClasses()
             .ThatAreNotAbstract()
             .SelectMany(type => type.AllInterfaces
@@ -114,39 +113,38 @@ public class FlattenedHandlerRegistryGenerator : FluentGenerator
                     Handler = type,
                     Interface = iface,
                     Kind = iface.Name.StartsWith("ICommand") ? "Command" : "Query"
-                }));
+                }))
+            .GenerateAll(registrations =>
+            {
+                var grouped = registrations
+                    .GroupBy(r => r.Kind)
+                    .ToDictionary(g => g.Key, g => g.ToList());
 
-        ctx.GenerateAll(query, registrations =>
-        {
-            var grouped = registrations
-                .GroupBy(r => r.Kind)
-                .ToDictionary(g => g.Key, g => g.ToList());
+                var commands = grouped.GetValueOrDefault("Command", []);
+                var queries = grouped.GetValueOrDefault("Query", []);
 
-            var commands = grouped.GetValueOrDefault("Command", []);
-            var queries = grouped.GetValueOrDefault("Query", []);
+                return ("FlattenedHandlerRegistry.g.cs", $$"""
+                    using Microsoft.Extensions.DependencyInjection;
 
-            return ("FlattenedHandlerRegistry.g.cs", $$"""
-                using Microsoft.Extensions.DependencyInjection;
+                    namespace Kurrent.Generated;
 
-                namespace Kurrent.Generated;
-
-                /// <summary>
-                /// Handler registry using flattened interface extraction.
-                /// </summary>
-                public static class FlattenedHandlerRegistry
-                {
-                    public static IServiceCollection AddAllHandlers(this IServiceCollection services)
+                    /// <summary>
+                    /// Handler registry using flattened interface extraction.
+                    /// </summary>
+                    public static class FlattenedHandlerRegistry
                     {
-                        // {{commands.Count}} Command Handlers
-                        {{string.Join("\n            ", commands.Select(c => $"services.AddScoped<{c.Interface.GlobalName()}, {c.Handler.GlobalName()}>();"))}}
+                        public static IServiceCollection AddAllHandlers(this IServiceCollection services)
+                        {
+                            // {{commands.Count}} Command Handlers
+                            {{string.Join("\n            ", commands.Select(c => $"services.AddScoped<{c.Interface.GlobalName()}, {c.Handler.GlobalName()}>();"))}}
 
-                        // {{queries.Count}} Query Handlers
-                        {{string.Join("\n            ", queries.Select(q => $"services.AddScoped<{q.Interface.GlobalName()}, {q.Handler.GlobalName()}>();"))}}
+                            // {{queries.Count}} Query Handlers
+                            {{string.Join("\n            ", queries.Select(q => $"services.AddScoped<{q.Interface.GlobalName()}, {q.Handler.GlobalName()}>();"))}}
 
-                        return services;
+                            return services;
+                        }
                     }
-                }
-                """);
-        });
+                    """);
+            });
     }
 }

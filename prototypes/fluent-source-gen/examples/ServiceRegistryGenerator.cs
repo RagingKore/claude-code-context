@@ -32,41 +32,40 @@ public class ServiceRegistryGenerator : FluentGenerator
 {
     protected override void Configure(GeneratorContext ctx)
     {
-        var query = ctx.Types
+        ctx.Types
             .ThatAreClasses()
             .ThatAreNotAbstract()
             .ThatArePublic()
-            .WithAttribute("Kurrent.AutoRegisterAttribute");
+            .WithAttribute("Kurrent.AutoRegisterAttribute")
+            .GenerateAll(types =>
+            {
+                var registrations = types
+                    .Select(item => GenerateRegistration(item.Symbol, item.Attribute))
+                    .ToList();
 
-        ctx.GenerateAll(query, types =>
-        {
-            var registrations = types
-                .Select(item => GenerateRegistration(item.Symbol, item.Attribute))
-                .ToList();
+                var registrationCode = string.Join("\n            ", registrations);
 
-            var registrationCode = string.Join("\n            ", registrations);
+                return ("ServiceRegistry.g.cs", $$"""
+                    using Microsoft.Extensions.DependencyInjection;
 
-            return ("ServiceRegistry.g.cs", $$"""
-                using Microsoft.Extensions.DependencyInjection;
+                    namespace Kurrent.Generated;
 
-                namespace Kurrent.Generated;
-
-                /// <summary>
-                /// Auto-generated service registrations.
-                /// </summary>
-                public static class ServiceRegistry
-                {
                     /// <summary>
-                    /// Registers all auto-discovered services.
+                    /// Auto-generated service registrations.
                     /// </summary>
-                    public static IServiceCollection AddGeneratedServices(this IServiceCollection services)
+                    public static class ServiceRegistry
                     {
-                        {{registrationCode}}
-                        return services;
+                        /// <summary>
+                        /// Registers all auto-discovered services.
+                        /// </summary>
+                        public static IServiceCollection AddGeneratedServices(this IServiceCollection services)
+                        {
+                            {{registrationCode}}
+                            return services;
+                        }
                     }
-                }
-                """);
-        });
+                    """);
+            });
     }
 
     static string GenerateRegistration(INamedTypeSymbol type, AttributeMatch attr)
@@ -110,51 +109,50 @@ public class NamespacedServiceRegistryGenerator : FluentGenerator
 {
     protected override void Configure(GeneratorContext ctx)
     {
-        var query = ctx.Types
+        ctx.Types
             .ThatAreClasses()
             .ThatAreNotAbstract()
             .ThatArePublic()
             .WithAttribute("Kurrent.AutoRegisterAttribute")
-            .GroupByNamespace();
-
-        ctx.Generate(query, (ns, types) =>
-        {
-            if (string.IsNullOrEmpty(ns)) return null;
-
-            var registrations = types.Select(t =>
+            .GroupByNamespace()
+            .Generate((ns, types) =>
             {
-                var serviceInterface = t.AllInterfaces
-                    .FirstOrDefault(i => !i.Name.StartsWith("IDisposable"));
+                if (string.IsNullOrEmpty(ns)) return null;
 
-                return serviceInterface is not null
-                    ? $"services.AddScoped<{serviceInterface.GlobalName()}, {t.GlobalName()}>();"
-                    : $"services.AddScoped<{t.GlobalName()}>();";
-            });
-
-            var registrationCode = string.Join("\n            ", registrations);
-            var className = ns.Split('.').Last() + "Services";
-            var hintName = SourceGeneratorFileNaming.GetNamespaceGroupHintName(ns, FileNamingOptions.Default);
-
-            return (hintName, $$"""
-                using Microsoft.Extensions.DependencyInjection;
-
-                namespace {{ns}};
-
-                /// <summary>
-                /// Auto-generated service registrations for {{ns}}.
-                /// </summary>
-                public static partial class {{className}}
+                var registrations = types.Select(t =>
                 {
+                    var serviceInterface = t.AllInterfaces
+                        .FirstOrDefault(i => !i.Name.StartsWith("IDisposable"));
+
+                    return serviceInterface is not null
+                        ? $"services.AddScoped<{serviceInterface.GlobalName()}, {t.GlobalName()}>();"
+                        : $"services.AddScoped<{t.GlobalName()}>();";
+                });
+
+                var registrationCode = string.Join("\n            ", registrations);
+                var className = ns.Split('.').Last() + "Services";
+                var hintName = SourceGeneratorFileNaming.GetNamespaceGroupHintName(ns, FileNamingOptions.Default);
+
+                return (hintName, $$"""
+                    using Microsoft.Extensions.DependencyInjection;
+
+                    namespace {{ns}};
+
                     /// <summary>
-                    /// Registers services from {{ns}}.
+                    /// Auto-generated service registrations for {{ns}}.
                     /// </summary>
-                    public static IServiceCollection Add{{className}}(this IServiceCollection services)
+                    public static partial class {{className}}
                     {
-                        {{registrationCode}}
-                        return services;
+                        /// <summary>
+                        /// Registers services from {{ns}}.
+                        /// </summary>
+                        public static IServiceCollection Add{{className}}(this IServiceCollection services)
+                        {
+                            {{registrationCode}}
+                            return services;
+                        }
                     }
-                }
-                """);
-        });
+                    """);
+            });
     }
 }
