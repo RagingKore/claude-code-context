@@ -64,8 +64,27 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     public void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterGroupedTypeQueryOutput(provider, generator));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
+            {
+                foreach (var group in groupedResult.GetGroups())
+                {
+                    try
+                    {
+                        var result = generator(group.Key, group.Types);
+                        if (result is null) continue;
+                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                    }
+                    catch (Exception ex)
+                    {
+                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
+                    }
+                }
+            });
+        });
     }
 
     /// <summary>
@@ -74,8 +93,27 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     public void Generate(Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterGroupedTypeQueryWithAttributeOutput(provider, generator));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
+            {
+                foreach (var group in groupedResult.GetGroups())
+                {
+                    try
+                    {
+                        var result = generator(group.Key, group.TypesWithAttributes);
+                        if (result is null) continue;
+                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                    }
+                    catch (Exception ex)
+                    {
+                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
+                    }
+                }
+            });
+        });
     }
 
     #endregion

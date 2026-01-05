@@ -1209,13 +1209,28 @@ public sealed class TypeQuery
     /// <summary>
     /// Generate source code for each matching type.
     /// </summary>
-    /// <param name="generator">Function that receives the type and returns source code (or null to skip).</param>
-    /// <param name="suffix">Optional suffix for the generated file name.</param>
     public void Generate(Func<INamedTypeSymbol, string?> generator, string? suffix = null)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterTypeQueryOutput(provider, generator, suffix));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, result) =>
+            {
+                if (result.Symbol is null) return;
+                try
+                {
+                    var source = generator(result.Symbol);
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, result.Symbol.Name, ex, result.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
     }
 
     /// <summary>
@@ -1224,8 +1239,25 @@ public sealed class TypeQuery
     public void Generate(Func<INamedTypeSymbol, AttributeMatch, string?> generator, string? suffix = null)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterTypeQueryWithAttributeOutput(provider, generator, suffix));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, result) =>
+            {
+                if (result.Symbol is null || result.Attributes.Count == 0) return;
+                try
+                {
+                    var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]));
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, result.Symbol.Name, ex, result.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
     }
 
     /// <summary>
@@ -1234,8 +1266,25 @@ public sealed class TypeQuery
     public void Generate(Func<INamedTypeSymbol, InterfaceMatch, string?> generator, string? suffix = null)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterTypeQueryWithInterfaceOutput(provider, generator, suffix));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, result) =>
+            {
+                if (result.Symbol is null || result.Interfaces.Count == 0) return;
+                try
+                {
+                    var source = generator(result.Symbol, new InterfaceMatch(result.Interfaces[0]));
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, result.Symbol.Name, ex, result.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
     }
 
     /// <summary>
@@ -1244,8 +1293,25 @@ public sealed class TypeQuery
     public void Generate(Func<INamedTypeSymbol, AttributeMatch, InterfaceMatch, string?> generator, string? suffix = null)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterTypeQueryWithBothOutput(provider, generator, suffix));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, result) =>
+            {
+                if (result.Symbol is null || result.Attributes.Count == 0 || result.Interfaces.Count == 0) return;
+                try
+                {
+                    var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]), new InterfaceMatch(result.Interfaces[0]));
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, result.Symbol.Name, ex, result.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
     }
 
     /// <summary>
@@ -1254,8 +1320,26 @@ public sealed class TypeQuery
     public void GenerateAll(Func<IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterCollectedTypeQueryOutput(provider, generator));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider.Collect(), (spc, results) =>
+            {
+                var symbols = results.Where(r => r.Symbol is not null).Select(r => r.Symbol!).ToList();
+                if (symbols.Count == 0) return;
+                try
+                {
+                    var result = generator(symbols);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
     }
 
     /// <summary>
@@ -1264,8 +1348,29 @@ public sealed class TypeQuery
     public void GenerateAll(Func<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterCollectedTypeQueryWithAttributeOutput(provider, generator));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider.Collect(), (spc, results) =>
+            {
+                var items = results
+                    .Where(r => r.Symbol is not null && r.Attributes.Count > 0)
+                    .Select(r => (r.Symbol!, new AttributeMatch(r.Attributes[0])))
+                    .ToList();
+                if (items.Count == 0) return;
+                try
+                {
+                    var result = generator(items);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
     }
 
     #endregion

@@ -78,8 +78,25 @@ public sealed class ProjectedTypeQuery<T>
     public void Generate(Func<T, INamedTypeSymbol, string?> generator, string? suffix = null)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterProjectedTypeQueryOutput(provider, generator, suffix));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, item) =>
+            {
+                if (item.Value is null || item.Symbol is null) return;
+                try
+                {
+                    var source = generator(item.Value, item.Symbol);
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(item.Symbol, suffix), source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, item.Symbol.Name, ex, item.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
     }
 
     /// <summary>
@@ -88,8 +105,26 @@ public sealed class ProjectedTypeQuery<T>
     public void GenerateAll(Func<IReadOnlyList<T>, (string HintName, string Source)?> generator)
     {
         var provider = BuildCollected();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterCollectedProjectedOutput(provider, generator));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, items) =>
+            {
+                var values = items.Where(i => i.Value is not null).Select(i => i.Value!).ToList();
+                if (values.Count == 0) return;
+                try
+                {
+                    var result = generator(values);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
     }
 
     /// <summary>
@@ -98,8 +133,29 @@ public sealed class ProjectedTypeQuery<T>
     public void GenerateAll(Func<IReadOnlyList<(T Value, INamedTypeSymbol Symbol)>, (string HintName, string Source)?> generator)
     {
         var provider = BuildCollected();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterCollectedProjectedWithSymbolOutput(provider, generator));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, items) =>
+            {
+                var pairs = items
+                    .Where(i => i.Value is not null && i.Symbol is not null)
+                    .Select(i => (i.Value!, i.Symbol!))
+                    .ToList();
+                if (pairs.Count == 0) return;
+                try
+                {
+                    var result = generator(pairs);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
     }
 
     #endregion
@@ -169,8 +225,25 @@ public sealed class FlattenedTypeQuery<T>
     public void GenerateAll(Func<IReadOnlyList<FlattenedItem<T>>, (string HintName, string Source)?> generator)
     {
         var provider = BuildCollected();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterFlattenedTypeQueryOutput(provider, generator));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, items) =>
+            {
+                if (items.Count == 0) return;
+                try
+                {
+                    var result = generator(items.ToList());
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
     }
 
     #endregion
@@ -227,8 +300,27 @@ public sealed class ProjectedGroupedQuery<TKey, T> where TKey : notnull
     public void Generate(Func<TKey, IReadOnlyList<T>, (string HintName, string Source)?> generator)
     {
         var provider = Build();
+        var ctx = _context;
+
         _context.EnqueueRegistration(() =>
-            _context.RegisterProjectedGroupedOutput(provider, generator));
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
+            {
+                foreach (var group in groupedResult.GetGroups())
+                {
+                    try
+                    {
+                        var result = generator(group.Key, group.Values);
+                        if (result is null) continue;
+                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                    }
+                    catch (Exception ex)
+                    {
+                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
+                    }
+                }
+            });
+        });
     }
 
     #endregion

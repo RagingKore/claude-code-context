@@ -92,7 +92,6 @@ public sealed class GeneratorContext
 
     /// <summary>
     /// Enqueues a registration action to be executed after Configure() completes.
-    /// This is called internally by query Generate() methods.
     /// </summary>
     internal void EnqueueRegistration(Action registration)
     {
@@ -101,7 +100,6 @@ public sealed class GeneratorContext
 
     /// <summary>
     /// Executes all queued registrations.
-    /// Called by FluentGenerator after Configure() completes.
     /// </summary>
     internal void ExecuteAllRegistrations()
     {
@@ -111,440 +109,39 @@ public sealed class GeneratorContext
         }
     }
 
-    #region Internal Registration Helpers
-
-    internal void RegisterTypeQueryOutput(
-        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
-        Func<INamedTypeSymbol, string?> generator,
-        string? suffix)
+    /// <summary>
+    /// Adds source with standard normalization (auto-generated header).
+    /// </summary>
+    internal void AddSource(SourceProductionContext spc, string hintName, string source)
     {
-        var fileNaming = FileNaming;
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, result) =>
-        {
-            if (result.Symbol is null) return;
-
-            try
-            {
-                var source = generator(result.Symbol);
-                if (source is null) return;
-
-                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
-                if (suffix is not null)
-                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
-
-                var normalizedSource = NormalizeSource(source);
-                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    location,
-                    result.Symbol.Name,
-                    ex.Message));
-            }
-        });
+        var normalizedSource = NormalizeSource(source);
+        spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
     }
 
-    internal void RegisterTypeQueryWithAttributeOutput(
-        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
-        Func<INamedTypeSymbol, AttributeMatch, string?> generator,
-        string? suffix)
+    /// <summary>
+    /// Gets the hint name for a type symbol.
+    /// </summary>
+    internal string GetHintName(INamedTypeSymbol symbol, string? suffix = null)
     {
-        var fileNaming = FileNaming;
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, result) =>
-        {
-            if (result.Symbol is null || result.Attributes.Count == 0) return;
-
-            try
-            {
-                var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]));
-                if (source is null) return;
-
-                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
-                if (suffix is not null)
-                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
-
-                var normalizedSource = NormalizeSource(source);
-                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    location,
-                    result.Symbol.Name,
-                    ex.Message));
-            }
-        });
+        var hintName = SourceGeneratorFileNaming.GetHintName(symbol, FileNaming);
+        if (suffix is not null)
+            hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
+        return hintName;
     }
 
-    internal void RegisterTypeQueryWithInterfaceOutput(
-        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
-        Func<INamedTypeSymbol, InterfaceMatch, string?> generator,
-        string? suffix)
+    /// <summary>
+    /// Reports an exception as a diagnostic.
+    /// </summary>
+    internal void ReportException(SourceProductionContext spc, string context, Exception ex, Location? location = null)
     {
-        var fileNaming = FileNaming;
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, result) =>
-        {
-            if (result.Symbol is null || result.Interfaces.Count == 0) return;
-
-            try
-            {
-                var source = generator(result.Symbol, new InterfaceMatch(result.Interfaces[0]));
-                if (source is null) return;
-
-                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
-                if (suffix is not null)
-                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
-
-                var normalizedSource = NormalizeSource(source);
-                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    location,
-                    result.Symbol.Name,
-                    ex.Message));
-            }
-        });
+        spc.ReportDiagnostic(Diagnostic.Create(
+            Diagnostics.UnhandledException,
+            location ?? Location.None,
+            context,
+            ex.Message));
     }
 
-    internal void RegisterTypeQueryWithBothOutput(
-        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
-        Func<INamedTypeSymbol, AttributeMatch, InterfaceMatch, string?> generator,
-        string? suffix)
-    {
-        var fileNaming = FileNaming;
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, result) =>
-        {
-            if (result.Symbol is null || result.Attributes.Count == 0 || result.Interfaces.Count == 0) return;
-
-            try
-            {
-                var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]), new InterfaceMatch(result.Interfaces[0]));
-                if (source is null) return;
-
-                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
-                if (suffix is not null)
-                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
-
-                var normalizedSource = NormalizeSource(source);
-                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    location,
-                    result.Symbol.Name,
-                    ex.Message));
-            }
-        });
-    }
-
-    internal void RegisterCollectedTypeQueryOutput(
-        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
-        Func<IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
-    {
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider.Collect(), (spc, results) =>
-        {
-            var symbols = results.Where(r => r.Symbol is not null).Select(r => r.Symbol!).ToList();
-            if (symbols.Count == 0) return;
-
-            try
-            {
-                var result = generator(symbols);
-                if (result is null) return;
-
-                var normalizedSource = NormalizeSource(result.Value.Source);
-                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    Location.None,
-                    "collection",
-                    ex.Message));
-            }
-        });
-    }
-
-    internal void RegisterCollectedTypeQueryWithAttributeOutput(
-        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
-        Func<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
-    {
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider.Collect(), (spc, results) =>
-        {
-            var items = results
-                .Where(r => r.Symbol is not null && r.Attributes.Count > 0)
-                .Select(r => (r.Symbol!, new AttributeMatch(r.Attributes[0])))
-                .ToList();
-
-            if (items.Count == 0) return;
-
-            try
-            {
-                var result = generator(items);
-                if (result is null) return;
-
-                var normalizedSource = NormalizeSource(result.Value.Source);
-                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    Location.None,
-                    "collection",
-                    ex.Message));
-            }
-        });
-    }
-
-    internal void RegisterGroupedTypeQueryOutput<TKey>(
-        IncrementalValueProvider<GroupedQueryResult<TKey>> provider,
-        Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator) where TKey : notnull
-    {
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, groupedResult) =>
-        {
-            foreach (var group in groupedResult.GetGroups())
-            {
-                try
-                {
-                    var result = generator(group.Key, group.Types);
-                    if (result is null) continue;
-
-                    var normalizedSource = NormalizeSource(result.Value.Source);
-                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
-                }
-                catch (Exception ex)
-                {
-                    spc.ReportDiagnostic(Diagnostic.Create(
-                        diagnostics.UnhandledException,
-                        Location.None,
-                        $"group '{group.Key}'",
-                        ex.Message));
-                }
-            }
-        });
-    }
-
-    internal void RegisterGroupedTypeQueryWithAttributeOutput<TKey>(
-        IncrementalValueProvider<GroupedQueryResult<TKey>> provider,
-        Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator) where TKey : notnull
-    {
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, groupedResult) =>
-        {
-            foreach (var group in groupedResult.GetGroups())
-            {
-                try
-                {
-                    var result = generator(group.Key, group.TypesWithAttributes);
-                    if (result is null) continue;
-
-                    var normalizedSource = NormalizeSource(result.Value.Source);
-                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
-                }
-                catch (Exception ex)
-                {
-                    spc.ReportDiagnostic(Diagnostic.Create(
-                        diagnostics.UnhandledException,
-                        Location.None,
-                        $"group '{group.Key}'",
-                        ex.Message));
-                }
-            }
-        });
-    }
-
-    internal void RegisterProjectedTypeQueryOutput<T>(
-        IncrementalValuesProvider<ProjectedItem<T>> provider,
-        Func<T, INamedTypeSymbol, string?> generator,
-        string? suffix)
-    {
-        var fileNaming = FileNaming;
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, item) =>
-        {
-            if (item.Value is null || item.Symbol is null) return;
-
-            try
-            {
-                var source = generator(item.Value, item.Symbol);
-                if (source is null) return;
-
-                var hintName = SourceGeneratorFileNaming.GetHintName(item.Symbol, fileNaming);
-                if (suffix is not null)
-                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
-
-                var normalizedSource = NormalizeSource(source);
-                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                var location = item.Symbol.Locations.FirstOrDefault() ?? Location.None;
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    location,
-                    item.Symbol.Name,
-                    ex.Message));
-            }
-        });
-    }
-
-    internal void RegisterCollectedProjectedOutput<T>(
-        IncrementalValueProvider<IReadOnlyList<ProjectedItem<T>>> provider,
-        Func<IReadOnlyList<T>, (string HintName, string Source)?> generator)
-    {
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, items) =>
-        {
-            var values = items.Where(i => i.Value is not null).Select(i => i.Value!).ToList();
-            if (values.Count == 0) return;
-
-            try
-            {
-                var result = generator(values);
-                if (result is null) return;
-
-                var normalizedSource = NormalizeSource(result.Value.Source);
-                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    Location.None,
-                    "collection",
-                    ex.Message));
-            }
-        });
-    }
-
-    internal void RegisterCollectedProjectedWithSymbolOutput<T>(
-        IncrementalValueProvider<IReadOnlyList<ProjectedItem<T>>> provider,
-        Func<IReadOnlyList<(T Value, INamedTypeSymbol Symbol)>, (string HintName, string Source)?> generator)
-    {
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, items) =>
-        {
-            var pairs = items
-                .Where(i => i.Value is not null && i.Symbol is not null)
-                .Select(i => (i.Value!, i.Symbol!))
-                .ToList();
-
-            if (pairs.Count == 0) return;
-
-            try
-            {
-                var result = generator(pairs);
-                if (result is null) return;
-
-                var normalizedSource = NormalizeSource(result.Value.Source);
-                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    Location.None,
-                    "collection",
-                    ex.Message));
-            }
-        });
-    }
-
-    internal void RegisterProjectedGroupedOutput<TKey, T>(
-        IncrementalValueProvider<ProjectedGroupedResult<TKey, T>> provider,
-        Func<TKey, IReadOnlyList<T>, (string HintName, string Source)?> generator) where TKey : notnull
-    {
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, groupedResult) =>
-        {
-            foreach (var group in groupedResult.GetGroups())
-            {
-                try
-                {
-                    var result = generator(group.Key, group.Values);
-                    if (result is null) continue;
-
-                    var normalizedSource = NormalizeSource(result.Value.Source);
-                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
-                }
-                catch (Exception ex)
-                {
-                    spc.ReportDiagnostic(Diagnostic.Create(
-                        diagnostics.UnhandledException,
-                        Location.None,
-                        $"group '{group.Key}'",
-                        ex.Message));
-                }
-            }
-        });
-    }
-
-    internal void RegisterFlattenedTypeQueryOutput<T>(
-        IncrementalValueProvider<IReadOnlyList<FlattenedItem<T>>> provider,
-        Func<IReadOnlyList<FlattenedItem<T>>, (string HintName, string Source)?> generator)
-    {
-        var diagnostics = Diagnostics;
-
-        _context.RegisterSourceOutput(provider, (spc, items) =>
-        {
-            if (items.Count == 0) return;
-
-            try
-            {
-                var result = generator(items.ToList());
-                if (result is null) return;
-
-                var normalizedSource = NormalizeSource(result.Value.Source);
-                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
-            }
-            catch (Exception ex)
-            {
-                spc.ReportDiagnostic(Diagnostic.Create(
-                    diagnostics.UnhandledException,
-                    Location.None,
-                    "collection",
-                    ex.Message));
-            }
-        });
-    }
-
-    #endregion
-
-    #region Helpers
-
-    internal static string NormalizeSource(string source)
+    static string NormalizeSource(string source)
     {
         if (!source.TrimStart().StartsWith("//"))
         {
@@ -561,8 +158,6 @@ public sealed class GeneratorContext
 
         return source;
     }
-
-    #endregion
 }
 
 /// <summary>
@@ -599,7 +194,7 @@ public sealed class DiagnosticReporter
             DiagnosticSeverity.Info, isEnabledByDefault: true);
 
     /// <summary>
-    /// Creates a diagnostic for an unhandled exception during generation.
+    /// Diagnostic for unhandled exceptions during generation.
     /// </summary>
     internal DiagnosticDescriptor UnhandledException { get; } = new(
         "FSG0001",
