@@ -1,7 +1,9 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 
 namespace FluentSourceGen;
 
@@ -11,6 +13,8 @@ namespace FluentSourceGen;
 public sealed class TypeQuery
 {
     readonly IncrementalGeneratorInitializationContext _context;
+    readonly FileNamingOptions _fileNaming;
+    readonly DiagnosticReporter _diagnostics;
     readonly List<Func<SyntaxNode, bool>> _syntaxPredicates = [];
     readonly List<Func<INamedTypeSymbol, bool>> _semanticPredicates = [];
     readonly List<string> _attributePatterns = [];
@@ -21,9 +25,14 @@ public sealed class TypeQuery
     bool _requireAllAttributes;
     bool _requireAllInterfaces;
 
-    internal TypeQuery(IncrementalGeneratorInitializationContext context)
+    internal TypeQuery(
+        IncrementalGeneratorInitializationContext context,
+        FileNamingOptions fileNaming,
+        DiagnosticReporter diagnostics)
     {
         _context = context;
+        _fileNaming = fileNaming;
+        _diagnostics = diagnostics;
     }
 
     void ApplyPredicate(Func<INamedTypeSymbol, bool> predicate)
@@ -1076,138 +1085,218 @@ public sealed class TypeQuery
     #region Terminal Operations
 
     /// <summary>
-    /// Execute the query and process each matching type.
+    /// Generate source code for each matching type.
+    /// Return the source code string, or null to skip generation for that type.
     /// </summary>
-    public void ForEach(Action<INamedTypeSymbol, SourceEmitter> action)
+    /// <param name="generator">Function that receives the type and returns source code (or null to skip)</param>
+    /// <param name="suffix">Optional suffix for the generated file name (e.g., ".Operators")</param>
+    public void Generate(Func<INamedTypeSymbol, string?> generator, string? suffix = null)
     {
         var provider = CreateProvider();
+        var fileNaming = _fileNaming;
+        var diagnostics = _diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null) return;
 
-            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
-                action(result.Symbol, emitter);
+                var source = generator(result.Symbol);
+                if (source is null) return;
+
+                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                if (suffix is not null)
+                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
+
+                var normalizedSource = NormalizeSource(source);
+                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    location,
+                    result.Symbol.Name,
+                    ex.Message));
             }
         });
     }
 
     /// <summary>
-    /// Execute the query with attribute data and process each matching type.
+    /// Generate source code for each matching type with attribute data.
+    /// Return the source code string, or null to skip generation for that type.
     /// </summary>
-    public void ForEach(Action<INamedTypeSymbol, AttributeMatch, SourceEmitter> action)
+    /// <param name="generator">Function that receives the type and attribute, returns source code (or null to skip)</param>
+    /// <param name="suffix">Optional suffix for the generated file name</param>
+    public void Generate(Func<INamedTypeSymbol, AttributeMatch, string?> generator, string? suffix = null)
     {
         if (_attributePatterns.Count == 0)
             throw new InvalidOperationException("WithAttribute must be called before using this overload");
 
         var provider = CreateProvider();
+        var fileNaming = _fileNaming;
+        var diagnostics = _diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Attributes.Count == 0) return;
 
-            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
-                action(result.Symbol, new AttributeMatch(result.Attributes[0]), emitter);
+                var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]));
+                if (source is null) return;
+
+                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                if (suffix is not null)
+                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
+
+                var normalizedSource = NormalizeSource(source);
+                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    location,
+                    result.Symbol.Name,
+                    ex.Message));
             }
         });
     }
 
     /// <summary>
-    /// Execute the query with multiple attribute data and process each matching type.
+    /// Generate source code for each matching type with multiple attribute data.
+    /// Return the source code string, or null to skip generation for that type.
     /// </summary>
-    public void ForEach(Action<INamedTypeSymbol, IReadOnlyList<AttributeMatch>, SourceEmitter> action)
+    public void Generate(Func<INamedTypeSymbol, IReadOnlyList<AttributeMatch>, string?> generator, string? suffix = null)
     {
         if (_attributePatterns.Count == 0)
             throw new InvalidOperationException("WithAttribute/WithAllAttributes must be called before using this overload");
 
         var provider = CreateProvider();
+        var fileNaming = _fileNaming;
+        var diagnostics = _diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Attributes.Count == 0) return;
 
-            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
                 var matches = result.Attributes.Select(a => new AttributeMatch(a)).ToList();
-                action(result.Symbol, matches, emitter);
+                var source = generator(result.Symbol, matches);
+                if (source is null) return;
+
+                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                if (suffix is not null)
+                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
+
+                var normalizedSource = NormalizeSource(source);
+                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    location,
+                    result.Symbol.Name,
+                    ex.Message));
             }
         });
     }
 
     /// <summary>
-    /// Execute the query with interface data and process each matching type.
+    /// Generate source code for each matching type with interface data.
+    /// Return the source code string, or null to skip generation for that type.
     /// </summary>
-    public void ForEach(Action<INamedTypeSymbol, InterfaceMatch, SourceEmitter> action)
+    public void Generate(Func<INamedTypeSymbol, InterfaceMatch, string?> generator, string? suffix = null)
     {
         if (_interfacePatterns.Count == 0)
             throw new InvalidOperationException("Implementing must be called before using this overload");
 
         var provider = CreateProvider();
+        var fileNaming = _fileNaming;
+        var diagnostics = _diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Interfaces.Count == 0) return;
 
-            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
-                action(result.Symbol, new InterfaceMatch(result.Interfaces[0]), emitter);
+                var source = generator(result.Symbol, new InterfaceMatch(result.Interfaces[0]));
+                if (source is null) return;
+
+                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                if (suffix is not null)
+                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
+
+                var normalizedSource = NormalizeSource(source);
+                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    location,
+                    result.Symbol.Name,
+                    ex.Message));
             }
         });
     }
 
     /// <summary>
-    /// Execute the query with multiple interface data and process each matching type.
+    /// Generate source code for each matching type with multiple interface data.
+    /// Return the source code string, or null to skip generation for that type.
     /// </summary>
-    public void ForEach(Action<INamedTypeSymbol, IReadOnlyList<InterfaceMatch>, SourceEmitter> action)
+    public void Generate(Func<INamedTypeSymbol, IReadOnlyList<InterfaceMatch>, string?> generator, string? suffix = null)
     {
         if (_interfacePatterns.Count == 0)
             throw new InvalidOperationException("Implementing/ImplementingAll must be called before using this overload");
 
         var provider = CreateProvider();
+        var fileNaming = _fileNaming;
+        var diagnostics = _diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Interfaces.Count == 0) return;
 
-            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
                 var matches = result.Interfaces.Select(i => new InterfaceMatch(i)).ToList();
-                action(result.Symbol, matches, emitter);
+                var source = generator(result.Symbol, matches);
+                if (source is null) return;
+
+                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                if (suffix is not null)
+                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
+
+                var normalizedSource = NormalizeSource(source);
+                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    location,
+                    result.Symbol.Name,
+                    ex.Message));
             }
         });
     }
 
     /// <summary>
-    /// Execute the query with both attribute and interface data.
+    /// Generate source code for each matching type with both attribute and interface data.
+    /// Return the source code string, or null to skip generation for that type.
     /// </summary>
-    public void ForEach(Action<INamedTypeSymbol, AttributeMatch, InterfaceMatch, SourceEmitter> action)
+    public void Generate(Func<INamedTypeSymbol, AttributeMatch, InterfaceMatch, string?> generator, string? suffix = null)
     {
         if (_attributePatterns.Count == 0)
             throw new InvalidOperationException("WithAttribute must be called before using this overload");
@@ -1215,57 +1304,86 @@ public sealed class TypeQuery
             throw new InvalidOperationException("Implementing must be called before using this overload");
 
         var provider = CreateProvider();
+        var fileNaming = _fileNaming;
+        var diagnostics = _diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Attributes.Count == 0 || result.Interfaces.Count == 0) return;
 
-            var emitter = new SourceEmitter(spc, result.Symbol);
             try
             {
-                action(result.Symbol, new AttributeMatch(result.Attributes[0]), new InterfaceMatch(result.Interfaces[0]), emitter);
+                var source = generator(
+                    result.Symbol,
+                    new AttributeMatch(result.Attributes[0]),
+                    new InterfaceMatch(result.Interfaces[0]));
+                if (source is null) return;
+
+                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                if (suffix is not null)
+                    hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
+
+                var normalizedSource = NormalizeSource(source);
+                spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+                var location = result.Symbol.Locations.FirstOrDefault() ?? Location.None;
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    location,
+                    result.Symbol.Name,
+                    ex.Message));
             }
         });
     }
 
     /// <summary>
-    /// Collect all matching types and process them together.
+    /// Collect all matching types and generate a single source file.
+    /// Return (hintName, source) tuple, or null to skip generation.
     /// Useful for generating registries, factories, or aggregate files.
     /// </summary>
-    public void ForAll(Action<IReadOnlyList<INamedTypeSymbol>, CollectionEmitter> action)
+    /// <param name="generator">Function that receives all types and returns (hintName, source) or null</param>
+    public void GenerateAll(Func<IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
         var provider = CreateProvider().Collect();
+        var diagnostics = _diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, results) =>
         {
             var symbols = results.Where(r => r.Symbol is not null).Select(r => r.Symbol!).ToList();
             if (symbols.Count == 0) return;
 
-            var emitter = new CollectionEmitter(spc);
             try
             {
-                action(symbols, emitter);
+                var result = generator(symbols);
+                if (result is null) return;
+
+                var normalizedSource = NormalizeSource(result.Value.Source);
+                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    Location.None,
+                    "collection",
+                    ex.Message));
             }
         });
     }
 
     /// <summary>
-    /// Collect all matching types with their attribute data and process them together.
+    /// Collect all matching types with their attribute data and generate a single source file.
+    /// Return (hintName, source) tuple, or null to skip generation.
     /// </summary>
-    public void ForAll(Action<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, CollectionEmitter> action)
+    public void GenerateAll(Func<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
     {
         if (_attributePatterns.Count == 0)
             throw new InvalidOperationException("WithAttribute must be called before using this overload");
 
         var provider = CreateProvider().Collect();
+        var diagnostics = _diagnostics;
 
         _context.RegisterSourceOutput(provider, (spc, results) =>
         {
@@ -1276,16 +1394,44 @@ public sealed class TypeQuery
 
             if (items.Count == 0) return;
 
-            var emitter = new CollectionEmitter(spc);
             try
             {
-                action(items, emitter);
+                var result = generator(items);
+                if (result is null) return;
+
+                var normalizedSource = NormalizeSource(result.Value.Source);
+                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    Location.None,
+                    "collection",
+                    ex.Message));
             }
         });
+    }
+
+    /// <summary>
+    /// Normalizes source code by adding standard headers if not present.
+    /// </summary>
+    static string NormalizeSource(string source)
+    {
+        if (!source.TrimStart().StartsWith("//"))
+        {
+            return $"""
+                // <auto-generated />
+                // This file was auto-generated by FluentSourceGen.
+                // Changes to this file may be lost when the file is regenerated.
+
+                #nullable enable
+
+                {source}
+                """;
+        }
+
+        return source;
     }
 
     #endregion
@@ -1300,11 +1446,11 @@ public sealed class TypeQuery
     /// ctx.Types()
     ///     .WithAttribute("MyAttribute")
     ///     .GroupBy(t => t.ContainingNamespace.ToDisplayString())
-    ///     .ForEachGroup((ns, types, emit) => { ... });
+    ///     .GeneratePerGroup((ns, types) => ($"{ns}.g.cs", "..."));
     /// </example>
     public GroupedTypeQuery<TKey> GroupBy<TKey>(Func<INamedTypeSymbol, TKey> keySelector) where TKey : notnull
     {
-        return new GroupedTypeQuery<TKey>(_context, CreateProvider(), keySelector);
+        return new GroupedTypeQuery<TKey>(_context, CreateProvider(), keySelector, _fileNaming, _diagnostics);
     }
 
     /// <summary>
@@ -1312,7 +1458,7 @@ public sealed class TypeQuery
     /// </summary>
     public GroupedTypeQuery<TKey> GroupBy<TKey>(Func<INamedTypeSymbol, TKey> keySelector, IEqualityComparer<TKey> comparer) where TKey : notnull
     {
-        return new GroupedTypeQuery<TKey>(_context, CreateProvider(), keySelector, comparer);
+        return new GroupedTypeQuery<TKey>(_context, CreateProvider(), keySelector, comparer, _fileNaming, _diagnostics);
     }
 
     /// <summary>
@@ -1345,7 +1491,7 @@ public sealed class TypeQuery
     /// ctx.Types()
     ///     .Implementing("IEntity")
     ///     .Select(t => new { t.Name, Properties = t.GetMembers().OfType&lt;IPropertySymbol&gt;().ToList() })
-    ///     .ForEach((data, emit) => { ... });
+    ///     .Generate((data, symbol) => "...");
     /// </example>
     public ProjectedTypeQuery<T> Select<T>(Func<INamedTypeSymbol, T> selector)
     {
@@ -1355,7 +1501,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(_context, projected);
+        return new ProjectedTypeQuery<T>(_context, projected, _fileNaming, _diagnostics);
     }
 
     /// <summary>
@@ -1372,7 +1518,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new AttributeMatch(result.Attributes[0])))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(_context, projected);
+        return new ProjectedTypeQuery<T>(_context, projected, _fileNaming, _diagnostics);
     }
 
     /// <summary>
@@ -1389,7 +1535,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new InterfaceMatch(result.Interfaces[0])))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(_context, projected);
+        return new ProjectedTypeQuery<T>(_context, projected, _fileNaming, _diagnostics);
     }
 
     /// <summary>
@@ -1401,7 +1547,7 @@ public sealed class TypeQuery
     ///     .ThatAreClasses()
     ///     .SelectMany(t => t.GetMembers().OfType&lt;IPropertySymbol&gt;())
     ///     .Distinct()
-    ///     .ForAll((properties, emit) => { ... });
+    ///     .GenerateAll((properties) => ("Props.g.cs", "..."));
     /// </example>
     public FlattenedTypeQuery<T> SelectMany<T>(Func<INamedTypeSymbol, IEnumerable<T>> selector)
     {
@@ -1417,7 +1563,7 @@ public sealed class TypeQuery
                 .Select(value => new FlattenedItem<T>(result.Symbol, value));
         });
 
-        return new FlattenedTypeQuery<T>(_context, flattened);
+        return new FlattenedTypeQuery<T>(_context, flattened, _fileNaming, _diagnostics);
     }
 
     /// <summary>
