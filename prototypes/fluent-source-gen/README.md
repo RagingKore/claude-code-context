@@ -173,6 +173,13 @@ ctx.Types
     .ThatAreReadonly()             // Readonly structs
     .ThatAreRefStructs()           // Ref structs
     .WithModifiers(TypeModifiers.Partial | TypeModifiers.Sealed)
+
+    // Negation variants
+    .ThatAreNotPartial()
+    .ThatAreNotStatic()
+    .ThatAreNotAbstract()          // Concrete types only
+    .ThatAreNotSealed()
+    .WithoutModifiers(TypeModifiers.Abstract | TypeModifiers.Static)
 ```
 
 ### Accessibility Filters
@@ -304,15 +311,6 @@ ctx.Types
     .NotInAssembly("System.Private.CoreLib")            // Exclusion
     .NotInAssemblyMatching("Microsoft.*")               // Exclude pattern
     .NotInSystemAssemblies()                            // Exclude System.*, Microsoft.*, etc.
-```
-
-### Negation Modifier
-
-```csharp
-ctx.Types
-    .Not.ThatAreClasses()                               // Negates next filter
-    .Not.WithAttribute("Obsolete")
-    .Not.ThatAreSealed()
 ```
 
 ### Low-Level Access

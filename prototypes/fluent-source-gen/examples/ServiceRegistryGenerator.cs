@@ -34,7 +34,7 @@ public class ServiceRegistryGenerator : FluentGenerator
     {
         ctx.Types
             .ThatAreClasses()
-            .Not.ThatAreAbstract()
+            .ThatAreNotAbstract()
             .ThatArePublic()
             .WithAttribute("Kurrent.AutoRegisterAttribute")
             .ForAll((types, attr, emit) =>
@@ -111,7 +111,7 @@ public class NamespacedServiceRegistryGenerator : FluentGenerator
     {
         ctx.Types
             .ThatAreClasses()
-            .Not.ThatAreAbstract()
+            .ThatAreNotAbstract()
             .ThatArePublic()
             .WithAttribute("Kurrent.AutoRegisterAttribute")
             .GroupByNamespace()

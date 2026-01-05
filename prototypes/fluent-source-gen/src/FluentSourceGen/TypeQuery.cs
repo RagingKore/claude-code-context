@@ -18,7 +18,6 @@ public sealed class TypeQuery
     readonly List<string> _excludedAttributePatterns = [];
     readonly List<string> _excludedInterfacePatterns = [];
 
-    bool _negateNext;
     bool _requireAllAttributes;
     bool _requireAllInterfaces;
 
@@ -27,47 +26,15 @@ public sealed class TypeQuery
         _context = context;
     }
 
-    #region Negation Modifier
-
-    /// <summary>
-    /// Negates the next filter condition.
-    /// </summary>
-    public TypeQuery Not
-    {
-        get
-        {
-            _negateNext = true;
-            return this;
-        }
-    }
-
     void ApplyPredicate(Func<INamedTypeSymbol, bool> predicate)
     {
-        if (_negateNext)
-        {
-            _semanticPredicates.Add(t => !predicate(t));
-            _negateNext = false;
-        }
-        else
-        {
-            _semanticPredicates.Add(predicate);
-        }
+        _semanticPredicates.Add(predicate);
     }
 
     void ApplySyntaxPredicate(Func<SyntaxNode, bool> predicate)
     {
-        if (_negateNext)
-        {
-            _syntaxPredicates.Add(n => !predicate(n));
-            _negateNext = false;
-        }
-        else
-        {
-            _syntaxPredicates.Add(predicate);
-        }
+        _syntaxPredicates.Add(predicate);
     }
-
-    #endregion
 
     #region Type Kind Filters
 
@@ -236,6 +203,53 @@ public sealed class TypeQuery
     public TypeQuery ThatAreRefStructs()
     {
         ApplyPredicate(t => t.IsRefLikeType);
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude partial types.
+    /// </summary>
+    public TypeQuery ThatAreNotPartial()
+    {
+        ApplySyntaxPredicate(node =>
+            node is not TypeDeclarationSyntax tds ||
+            !tds.Modifiers.Any(m => m.IsKind(SyntaxKind.PartialKeyword)));
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude static types.
+    /// </summary>
+    public TypeQuery ThatAreNotStatic()
+    {
+        ApplyPredicate(t => !t.IsStatic);
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude abstract types (concrete types only).
+    /// </summary>
+    public TypeQuery ThatAreNotAbstract()
+    {
+        ApplyPredicate(t => !t.IsAbstract || t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Interface);
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude sealed types.
+    /// </summary>
+    public TypeQuery ThatAreNotSealed()
+    {
+        ApplyPredicate(t => !t.IsSealed);
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types with specified modifiers.
+    /// </summary>
+    public TypeQuery WithoutModifiers(TypeModifiers modifiers)
+    {
+        ApplyPredicate(t => !MatchesModifiers(t, modifiers));
         return this;
     }
 

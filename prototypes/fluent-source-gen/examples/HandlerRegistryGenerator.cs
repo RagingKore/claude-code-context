@@ -37,7 +37,7 @@ public class HandlerRegistryGenerator : FluentGenerator
         // Project handlers to extract their handler type and interface
         ctx.Types
             .ThatAreClasses()
-            .Not.ThatAreAbstract()
+            .ThatAreNotAbstract()
             .ImplementingAny("Kurrent.ICommandHandler<>", "Kurrent.IQueryHandler<>")
             .Select(type => new
             {
@@ -105,7 +105,7 @@ public class FlattenedHandlerRegistryGenerator : FluentGenerator
         // Use SelectMany to extract all handler interfaces from all types
         ctx.Types
             .ThatAreClasses()
-            .Not.ThatAreAbstract()
+            .ThatAreNotAbstract()
             .SelectMany(type => type.AllInterfaces
                 .Where(i => i.Name.StartsWith("ICommandHandler") || i.Name.StartsWith("IQueryHandler"))
                 .Select(iface => new
