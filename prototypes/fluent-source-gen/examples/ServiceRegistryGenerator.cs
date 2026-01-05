@@ -30,7 +30,7 @@ namespace Examples;
 [Generator]
 public class ServiceRegistryGenerator : FluentGenerator
 {
-    protected override void Configure(GeneratorContext ctx)
+    protected override void Execute(GeneratorContext ctx)
     {
         ctx.Types
             .ThatAreClasses()
@@ -107,7 +107,7 @@ public class ServiceRegistryGenerator : FluentGenerator
 [Generator]
 public class NamespacedServiceRegistryGenerator : FluentGenerator
 {
-    protected override void Configure(GeneratorContext ctx)
+    protected override void Execute(GeneratorContext ctx)
     {
         ctx.Types
             .ThatAreClasses()

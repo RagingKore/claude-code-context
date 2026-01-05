@@ -6,7 +6,7 @@ namespace FluentSourceGen;
 
 /// <summary>
 /// Base class for fluent source generators.
-/// Inherit from this class and override <see cref="Configure"/> to define your generation logic.
+/// Inherit from this class and override <see cref="Execute"/> to define your generation logic.
 /// </summary>
 public abstract class FluentGenerator : IIncrementalGenerator
 {
@@ -28,22 +28,23 @@ public abstract class FluentGenerator : IIncrementalGenerator
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
         var generatorContext = new GeneratorContext(context, FileNaming, DiagnosticIdPrefix);
-        Configure(generatorContext);
+        Execute(generatorContext);
+        generatorContext.RegisterOutputs();
     }
 
     /// <summary>
-    /// Override this method to configure your source generation logic.
+    /// Override this method to define your source generation logic.
     /// </summary>
-    /// <param name="context">The generator context providing access to type queries.</param>
-    protected abstract void Configure(GeneratorContext context);
+    protected abstract void Execute(GeneratorContext context);
 }
 
 /// <summary>
-/// Context for configuring fluent source generators.
+/// Context for fluent source generators.
 /// </summary>
 public sealed class GeneratorContext
 {
     readonly IncrementalGeneratorInitializationContext _context;
+    readonly List<Action> _pendingRegistrations = [];
 
     internal GeneratorContext(
         IncrementalGeneratorInitializationContext context,
@@ -54,11 +55,6 @@ public sealed class GeneratorContext
         FileNaming = fileNaming;
         Diagnostics = new DiagnosticReporter(diagnosticIdPrefix);
     }
-
-    /// <summary>
-    /// Gets the underlying Roslyn incremental generator context.
-    /// </summary>
-    public IncrementalGeneratorInitializationContext RoslynContext => _context;
 
     /// <summary>
     /// Gets the file naming options configured for this generator.
@@ -73,17 +69,44 @@ public sealed class GeneratorContext
     /// <summary>
     /// Starts a fluent query to find and process types.
     /// </summary>
-    public TypeQuery Types => new(_context, FileNaming, Diagnostics);
+    public TypeQuery Types => new(_context, this);
 
     /// <summary>
     /// Registers a post-initialization output (e.g., marker attributes).
     /// </summary>
-    /// <param name="hintName">The hint name for the generated file.</param>
-    /// <param name="source">The source code to emit.</param>
     public void AddPostInitializationOutput(string hintName, string source)
     {
-        _context.RegisterPostInitializationOutput(ctx =>
-            ctx.AddSource(hintName, source));
+        _pendingRegistrations.Add(() =>
+            _context.RegisterPostInitializationOutput(ctx =>
+                ctx.AddSource(hintName, source)));
+    }
+
+    /// <summary>
+    /// Adds a pending source output registration.
+    /// </summary>
+    internal void AddSourceOutput<T>(IncrementalValuesProvider<T> provider, Action<SourceProductionContext, T> action)
+    {
+        _pendingRegistrations.Add(() => _context.RegisterSourceOutput(provider, action));
+    }
+
+    /// <summary>
+    /// Adds a pending collected source output registration.
+    /// </summary>
+    internal void AddSourceOutput<T>(IncrementalValueProvider<System.Collections.Immutable.ImmutableArray<T>> provider, Action<SourceProductionContext, System.Collections.Immutable.ImmutableArray<T>> action)
+    {
+        _pendingRegistrations.Add(() => _context.RegisterSourceOutput(provider, action));
+    }
+
+    /// <summary>
+    /// Registers all pending outputs with Roslyn.
+    /// Called by FluentGenerator after Execute completes.
+    /// </summary>
+    internal void RegisterOutputs()
+    {
+        foreach (var registration in _pendingRegistrations)
+        {
+            registration();
+        }
     }
 }
 
@@ -93,9 +116,6 @@ public sealed class GeneratorContext
 public sealed class DiagnosticReporter
 {
     readonly string _idPrefix;
-    int _errorCounter;
-    int _warningCounter;
-    int _infoCounter;
 
     internal DiagnosticReporter(string idPrefix)
     {
@@ -124,7 +144,7 @@ public sealed class DiagnosticReporter
             DiagnosticSeverity.Info, isEnabledByDefault: true);
 
     /// <summary>
-    /// Creates a diagnostic for an unhandled exception during generation.
+    /// Diagnostic for unhandled exceptions during generation.
     /// </summary>
     internal DiagnosticDescriptor UnhandledException { get; } = new(
         "FSG0001",

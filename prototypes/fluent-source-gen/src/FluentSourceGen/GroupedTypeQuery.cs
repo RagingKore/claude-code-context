@@ -8,45 +8,39 @@ namespace FluentSourceGen;
 /// Represents types grouped by a key selector.
 /// Enables processing types in groups for generating aggregate outputs per group.
 /// </summary>
-/// <typeparam name="TKey">The type of the grouping key.</typeparam>
 public sealed class GroupedTypeQuery<TKey> where TKey : notnull
 {
-    readonly IncrementalGeneratorInitializationContext _context;
+    readonly IncrementalGeneratorInitializationContext _roslynContext;
     readonly IncrementalValuesProvider<TypeQuery.QueryResult> _provider;
     readonly Func<INamedTypeSymbol, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
-    readonly FileNamingOptions _fileNaming;
-    readonly DiagnosticReporter _diagnostics;
+    readonly GeneratorContext _generatorContext;
 
     internal GroupedTypeQuery(
-        IncrementalGeneratorInitializationContext context,
+        IncrementalGeneratorInitializationContext roslynContext,
         IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, TKey> keySelector,
-        FileNamingOptions fileNaming,
-        DiagnosticReporter diagnostics)
+        GeneratorContext generatorContext)
     {
-        _context = context;
+        _roslynContext = roslynContext;
         _provider = provider;
         _keySelector = keySelector;
         _comparer = EqualityComparer<TKey>.Default;
-        _fileNaming = fileNaming;
-        _diagnostics = diagnostics;
+        _generatorContext = generatorContext;
     }
 
     internal GroupedTypeQuery(
-        IncrementalGeneratorInitializationContext context,
+        IncrementalGeneratorInitializationContext roslynContext,
         IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, TKey> keySelector,
         IEqualityComparer<TKey> comparer,
-        FileNamingOptions fileNaming,
-        DiagnosticReporter diagnostics)
+        GeneratorContext generatorContext)
     {
-        _context = context;
+        _roslynContext = roslynContext;
         _provider = provider;
         _keySelector = keySelector;
         _comparer = comparer;
-        _fileNaming = fileNaming;
-        _diagnostics = diagnostics;
+        _generatorContext = generatorContext;
     }
 
     /// <summary>
@@ -57,11 +51,11 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
-        var diagnostics = _diagnostics;
+        var diagnostics = _generatorContext.Diagnostics;
 
         var collected = _provider.Collect();
 
-        _context.RegisterSourceOutput(collected, (spc, results) =>
+        _generatorContext.AddSourceOutput(collected, (spc, results) =>
         {
             var symbols = results
                 .Where(r => r.Symbol is not null)
@@ -103,11 +97,11 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
-        var diagnostics = _diagnostics;
+        var diagnostics = _generatorContext.Diagnostics;
 
         var collected = _provider.Collect();
 
-        _context.RegisterSourceOutput(collected, (spc, results) =>
+        _generatorContext.AddSourceOutput(collected, (spc, results) =>
         {
             var items = results
                 .Where(r => r.Symbol is not null && r.Attributes.Count > 0)
@@ -149,11 +143,11 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
-        var diagnostics = _diagnostics;
+        var diagnostics = _generatorContext.Diagnostics;
 
         var collected = _provider.Collect();
 
-        _context.RegisterSourceOutput(collected, (spc, results) =>
+        _generatorContext.AddSourceOutput(collected, (spc, results) =>
         {
             var items = results
                 .Where(r => r.Symbol is not null && r.Interfaces.Count > 0)
@@ -193,7 +187,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public GroupedTypeQuery<TKey> WhereGroup(Func<TKey, bool> predicate)
     {
-        return new FilteredGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, _fileNaming, _diagnostics, predicate);
+        return new FilteredGroupedTypeQuery<TKey>(_roslynContext, _provider, _keySelector, _comparer, _generatorContext, predicate);
     }
 
     /// <summary>
@@ -201,7 +195,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public OrderedGroupedTypeQuery<TKey> OrderByKey()
     {
-        return new OrderedGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, _fileNaming, _diagnostics, ascending: true);
+        return new OrderedGroupedTypeQuery<TKey>(_roslynContext, _provider, _keySelector, _comparer, _generatorContext, ascending: true);
     }
 
     /// <summary>
@@ -209,7 +203,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public OrderedGroupedTypeQuery<TKey> OrderByKeyDescending()
     {
-        return new OrderedGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, _fileNaming, _diagnostics, ascending: false);
+        return new OrderedGroupedTypeQuery<TKey>(_roslynContext, _provider, _keySelector, _comparer, _generatorContext, ascending: false);
     }
 
     static string NormalizeSource(string source)
@@ -237,27 +231,26 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
 internal sealed class FilteredGroupedTypeQuery<TKey> : GroupedTypeQuery<TKey> where TKey : notnull
 {
     readonly Func<TKey, bool> _groupPredicate;
-    readonly IncrementalGeneratorInitializationContext _context;
+    readonly IncrementalGeneratorInitializationContext _roslynContext;
     readonly IncrementalValuesProvider<TypeQuery.QueryResult> _provider;
     readonly Func<INamedTypeSymbol, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
-    readonly DiagnosticReporter _diagnostics;
+    readonly GeneratorContext _generatorContext;
 
     internal FilteredGroupedTypeQuery(
-        IncrementalGeneratorInitializationContext context,
+        IncrementalGeneratorInitializationContext roslynContext,
         IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, TKey> keySelector,
         IEqualityComparer<TKey> comparer,
-        FileNamingOptions fileNaming,
-        DiagnosticReporter diagnostics,
+        GeneratorContext generatorContext,
         Func<TKey, bool> groupPredicate)
-        : base(context, provider, keySelector, comparer, fileNaming, diagnostics)
+        : base(roslynContext, provider, keySelector, comparer, generatorContext)
     {
-        _context = context;
+        _roslynContext = roslynContext;
         _provider = provider;
         _keySelector = keySelector;
         _comparer = comparer;
-        _diagnostics = diagnostics;
+        _generatorContext = generatorContext;
         _groupPredicate = groupPredicate;
     }
 
@@ -269,11 +262,11 @@ internal sealed class FilteredGroupedTypeQuery<TKey> : GroupedTypeQuery<TKey> wh
         var keySelector = _keySelector;
         var comparer = _comparer;
         var groupPredicate = _groupPredicate;
-        var diagnostics = _diagnostics;
+        var diagnostics = _generatorContext.Diagnostics;
 
         var collected = _provider.Collect();
 
-        _context.RegisterSourceOutput(collected, (spc, results) =>
+        _generatorContext.AddSourceOutput(collected, (spc, results) =>
         {
             var symbols = results
                 .Where(r => r.Symbol is not null)
@@ -333,27 +326,26 @@ internal sealed class FilteredGroupedTypeQuery<TKey> : GroupedTypeQuery<TKey> wh
 /// </summary>
 public sealed class OrderedGroupedTypeQuery<TKey> where TKey : notnull
 {
-    readonly IncrementalGeneratorInitializationContext _context;
+    readonly IncrementalGeneratorInitializationContext _roslynContext;
     readonly IncrementalValuesProvider<TypeQuery.QueryResult> _provider;
     readonly Func<INamedTypeSymbol, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
-    readonly DiagnosticReporter _diagnostics;
+    readonly GeneratorContext _generatorContext;
     readonly bool _ascending;
 
     internal OrderedGroupedTypeQuery(
-        IncrementalGeneratorInitializationContext context,
+        IncrementalGeneratorInitializationContext roslynContext,
         IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, TKey> keySelector,
         IEqualityComparer<TKey> comparer,
-        FileNamingOptions fileNaming,
-        DiagnosticReporter diagnostics,
+        GeneratorContext generatorContext,
         bool ascending)
     {
-        _context = context;
+        _roslynContext = roslynContext;
         _provider = provider;
         _keySelector = keySelector;
         _comparer = comparer;
-        _diagnostics = diagnostics;
+        _generatorContext = generatorContext;
         _ascending = ascending;
     }
 
@@ -365,11 +357,11 @@ public sealed class OrderedGroupedTypeQuery<TKey> where TKey : notnull
         var keySelector = _keySelector;
         var comparer = _comparer;
         var ascending = _ascending;
-        var diagnostics = _diagnostics;
+        var diagnostics = _generatorContext.Diagnostics;
 
         var collected = _provider.Collect();
 
-        _context.RegisterSourceOutput(collected, (spc, results) =>
+        _generatorContext.AddSourceOutput(collected, (spc, results) =>
         {
             var symbols = results
                 .Where(r => r.Symbol is not null)

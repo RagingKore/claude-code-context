@@ -45,7 +45,7 @@ public class OperationErrorGenerator : FluentGenerator
         UseFoldersForNamespace = true
     };
 
-    protected override void Configure(GeneratorContext ctx)
+    protected override void Execute(GeneratorContext ctx)
     {
         ctx.Types
             .ThatAreRecords()

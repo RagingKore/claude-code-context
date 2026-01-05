@@ -1,4 +1,6 @@
+using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Text;
 
 namespace FluentSourceGen;
 
@@ -6,18 +8,20 @@ namespace FluentSourceGen;
 /// Represents a projected query where types have been transformed to another type.
 /// Enables chaining transformations before terminal operations.
 /// </summary>
-/// <typeparam name="T">The projected type.</typeparam>
 public sealed class ProjectedTypeQuery<T>
 {
-    readonly IncrementalGeneratorInitializationContext _context;
+    readonly IncrementalGeneratorInitializationContext _roslynContext;
     readonly IncrementalValuesProvider<ProjectedItem<T>> _provider;
+    readonly GeneratorContext _generatorContext;
 
     internal ProjectedTypeQuery(
-        IncrementalGeneratorInitializationContext context,
-        IncrementalValuesProvider<ProjectedItem<T>> provider)
+        IncrementalGeneratorInitializationContext roslynContext,
+        IncrementalValuesProvider<ProjectedItem<T>> provider,
+        GeneratorContext generatorContext)
     {
-        _context = context;
+        _roslynContext = roslynContext;
         _provider = provider;
+        _generatorContext = generatorContext;
     }
 
     /// <summary>
@@ -26,7 +30,7 @@ public sealed class ProjectedTypeQuery<T>
     public ProjectedTypeQuery<T> Where(Func<T, bool> predicate)
     {
         var filtered = _provider.Where(item => item.Value is not null && predicate(item.Value));
-        return new ProjectedTypeQuery<T>(_context, filtered);
+        return new ProjectedTypeQuery<T>(_roslynContext, filtered, _generatorContext);
     }
 
     /// <summary>
@@ -39,103 +43,42 @@ public sealed class ProjectedTypeQuery<T>
                 ? new ProjectedItem<TResult>(item.Symbol, selector(item.Value))
                 : new ProjectedItem<TResult>(item.Symbol, default));
 
-        return new ProjectedTypeQuery<TResult>(_context, projected);
+        return new ProjectedTypeQuery<TResult>(_roslynContext, projected, _generatorContext);
     }
 
     /// <summary>
-    /// Process each projected item.
+    /// Collect all projected items and generate a single source file.
+    /// Return (hintName, source) tuple, or null to skip generation.
     /// </summary>
-    public void ForEach(Action<T, INamedTypeSymbol, SourceEmitter> action)
-    {
-        _context.RegisterSourceOutput(_provider, (spc, item) =>
-        {
-            if (item.Value is null || item.Symbol is null) return;
-
-            var emitter = new SourceEmitter(spc, item.Symbol);
-            try
-            {
-                action(item.Value, item.Symbol, emitter);
-            }
-            catch (Exception ex)
-            {
-                emitter.ReportError("FLUENTGEN502", "Generator failed during projection", ex.ToString());
-            }
-        });
-    }
-
-    /// <summary>
-    /// Process each projected item (value only).
-    /// </summary>
-    public void ForEach(Action<T, SourceEmitter> action)
-    {
-        _context.RegisterSourceOutput(_provider, (spc, item) =>
-        {
-            if (item.Value is null || item.Symbol is null) return;
-
-            var emitter = new SourceEmitter(spc, item.Symbol);
-            try
-            {
-                action(item.Value, emitter);
-            }
-            catch (Exception ex)
-            {
-                emitter.ReportError("FLUENTGEN502", "Generator failed during projection", ex.ToString());
-            }
-        });
-    }
-
-    /// <summary>
-    /// Collect all projected items and process them together.
-    /// </summary>
-    public void ForAll(Action<IReadOnlyList<T>, CollectionEmitter> action)
+    public void GenerateAll(Func<IReadOnlyList<(INamedTypeSymbol Symbol, T Data)>, (string HintName, string Source)?> generator)
     {
         var collected = _provider.Collect();
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(collected, (spc, items) =>
-        {
-            var values = items
-                .Where(i => i.Value is not null)
-                .Select(i => i.Value!)
-                .ToList();
-
-            if (values.Count == 0) return;
-
-            var emitter = new CollectionEmitter(spc);
-            try
-            {
-                action(values, emitter);
-            }
-            catch (Exception ex)
-            {
-                emitter.ReportError("FLUENTGEN502", "Generator failed during collection projection", ex.ToString());
-            }
-        });
-    }
-
-    /// <summary>
-    /// Collect all projected items with their source symbols.
-    /// </summary>
-    public void ForAll(Action<IReadOnlyList<(T Value, INamedTypeSymbol Symbol)>, CollectionEmitter> action)
-    {
-        var collected = _provider.Collect();
-
-        _context.RegisterSourceOutput(collected, (spc, items) =>
+        _generatorContext.AddSourceOutput(collected, (spc, items) =>
         {
             var pairs = items
                 .Where(i => i.Value is not null && i.Symbol is not null)
-                .Select(i => (i.Value!, i.Symbol!))
+                .Select(i => (i.Symbol!, i.Value!))
                 .ToList();
 
             if (pairs.Count == 0) return;
 
-            var emitter = new CollectionEmitter(spc);
             try
             {
-                action(pairs, emitter);
+                var result = generator(pairs);
+                if (result is null) return;
+
+                var normalizedSource = NormalizeSource(result.Value.Source);
+                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN502", "Generator failed during collection projection", ex.ToString());
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    Location.None,
+                    "projected collection",
+                    ex.Message));
             }
         });
     }
@@ -145,7 +88,7 @@ public sealed class ProjectedTypeQuery<T>
     /// </summary>
     public ProjectedGroupedQuery<TKey, T> GroupBy<TKey>(Func<T, TKey> keySelector) where TKey : notnull
     {
-        return new ProjectedGroupedQuery<TKey, T>(_context, _provider, keySelector);
+        return new ProjectedGroupedQuery<TKey, T>(_roslynContext, _provider, keySelector, _generatorContext);
     }
 
     /// <summary>
@@ -156,7 +99,7 @@ public sealed class ProjectedTypeQuery<T>
         var collected = _provider.Collect();
         var distinctProvider = collected.SelectMany((items, _) =>
             items.Where(i => i.Value is not null).DistinctBy(i => i.Value));
-        return new ProjectedTypeQuery<T>(_context, distinctProvider);
+        return new ProjectedTypeQuery<T>(_roslynContext, distinctProvider, _generatorContext);
     }
 
     /// <summary>
@@ -167,25 +110,45 @@ public sealed class ProjectedTypeQuery<T>
         var collected = _provider.Collect();
         var distinctProvider = collected.SelectMany((items, _) =>
             items.Where(i => i.Value is not null).DistinctBy(i => i.Value, comparer));
-        return new ProjectedTypeQuery<T>(_context, distinctProvider);
+        return new ProjectedTypeQuery<T>(_roslynContext, distinctProvider, _generatorContext);
+    }
+
+    static string NormalizeSource(string source)
+    {
+        if (!source.TrimStart().StartsWith("//"))
+        {
+            return $"""
+                // <auto-generated />
+                // This file was auto-generated by FluentSourceGen.
+                // Changes to this file may be lost when the file is regenerated.
+
+                #nullable enable
+
+                {source}
+                """;
+        }
+
+        return source;
     }
 }
 
 /// <summary>
 /// Represents a flattened projected query from SelectMany.
 /// </summary>
-/// <typeparam name="T">The projected element type.</typeparam>
 public sealed class FlattenedTypeQuery<T>
 {
-    readonly IncrementalGeneratorInitializationContext _context;
+    readonly IncrementalGeneratorInitializationContext _roslynContext;
     readonly IncrementalValuesProvider<FlattenedItem<T>> _provider;
+    readonly GeneratorContext _generatorContext;
 
     internal FlattenedTypeQuery(
-        IncrementalGeneratorInitializationContext context,
-        IncrementalValuesProvider<FlattenedItem<T>> provider)
+        IncrementalGeneratorInitializationContext roslynContext,
+        IncrementalValuesProvider<FlattenedItem<T>> provider,
+        GeneratorContext generatorContext)
     {
-        _context = context;
+        _roslynContext = roslynContext;
         _provider = provider;
+        _generatorContext = generatorContext;
     }
 
     /// <summary>
@@ -194,75 +157,42 @@ public sealed class FlattenedTypeQuery<T>
     public FlattenedTypeQuery<T> Where(Func<T, bool> predicate)
     {
         var filtered = _provider.Where(item => item.Value is not null && predicate(item.Value));
-        return new FlattenedTypeQuery<T>(_context, filtered);
+        return new FlattenedTypeQuery<T>(_roslynContext, filtered, _generatorContext);
     }
 
     /// <summary>
-    /// Process each flattened item.
+    /// Collect all flattened items and generate a single source file.
+    /// Return (hintName, source) tuple, or null to skip generation.
     /// </summary>
-    public void ForEach(Action<T, INamedTypeSymbol, SourceEmitter> action)
-    {
-        _context.RegisterSourceOutput(_provider, (spc, item) =>
-        {
-            if (item.Value is null || item.SourceSymbol is null) return;
-
-            var emitter = new SourceEmitter(spc, item.SourceSymbol);
-            try
-            {
-                action(item.Value, item.SourceSymbol, emitter);
-            }
-            catch (Exception ex)
-            {
-                emitter.ReportError("FLUENTGEN503", "Generator failed during flattened projection", ex.ToString());
-            }
-        });
-    }
-
-    /// <summary>
-    /// Process each flattened item (value only).
-    /// </summary>
-    public void ForEach(Action<T, SourceEmitter> action)
-    {
-        _context.RegisterSourceOutput(_provider, (spc, item) =>
-        {
-            if (item.Value is null || item.SourceSymbol is null) return;
-
-            var emitter = new SourceEmitter(spc, item.SourceSymbol);
-            try
-            {
-                action(item.Value, emitter);
-            }
-            catch (Exception ex)
-            {
-                emitter.ReportError("FLUENTGEN503", "Generator failed during flattened projection", ex.ToString());
-            }
-        });
-    }
-
-    /// <summary>
-    /// Collect all flattened items.
-    /// </summary>
-    public void ForAll(Action<IReadOnlyList<T>, CollectionEmitter> action)
+    public void GenerateAll(Func<IReadOnlyList<(INamedTypeSymbol Symbol, T Data)>, (string HintName, string Source)?> generator)
     {
         var collected = _provider.Collect();
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(collected, (spc, items) =>
+        _generatorContext.AddSourceOutput(collected, (spc, items) =>
         {
-            var values = items
-                .Where(i => i.Value is not null)
-                .Select(i => i.Value!)
+            var pairs = items
+                .Where(i => i.Value is not null && i.SourceSymbol is not null)
+                .Select(i => (i.SourceSymbol!, i.Value!))
                 .ToList();
 
-            if (values.Count == 0) return;
+            if (pairs.Count == 0) return;
 
-            var emitter = new CollectionEmitter(spc);
             try
             {
-                action(values, emitter);
+                var result = generator(pairs);
+                if (result is null) return;
+
+                var normalizedSource = NormalizeSource(result.Value.Source);
+                spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
             }
             catch (Exception ex)
             {
-                emitter.ReportError("FLUENTGEN503", "Generator failed during collection", ex.ToString());
+                spc.ReportDiagnostic(Diagnostic.Create(
+                    diagnostics.UnhandledException,
+                    Location.None,
+                    "flattened collection",
+                    ex.Message));
             }
         });
     }
@@ -275,7 +205,25 @@ public sealed class FlattenedTypeQuery<T>
         var collected = _provider.Collect();
         var distinctProvider = collected.SelectMany((items, _) =>
             items.Where(i => i.Value is not null).DistinctBy(i => i.Value));
-        return new FlattenedTypeQuery<T>(_context, distinctProvider);
+        return new FlattenedTypeQuery<T>(_roslynContext, distinctProvider, _generatorContext);
+    }
+
+    static string NormalizeSource(string source)
+    {
+        if (!source.TrimStart().StartsWith("//"))
+        {
+            return $"""
+                // <auto-generated />
+                // This file was auto-generated by FluentSourceGen.
+                // Changes to this file may be lost when the file is regenerated.
+
+                #nullable enable
+
+                {source}
+                """;
+        }
+
+        return source;
     }
 }
 
@@ -284,34 +232,39 @@ public sealed class FlattenedTypeQuery<T>
 /// </summary>
 public sealed class ProjectedGroupedQuery<TKey, T> where TKey : notnull
 {
-    readonly IncrementalGeneratorInitializationContext _context;
+    readonly IncrementalGeneratorInitializationContext _roslynContext;
     readonly IncrementalValuesProvider<ProjectedItem<T>> _provider;
     readonly Func<T, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
+    readonly GeneratorContext _generatorContext;
 
     internal ProjectedGroupedQuery(
-        IncrementalGeneratorInitializationContext context,
+        IncrementalGeneratorInitializationContext roslynContext,
         IncrementalValuesProvider<ProjectedItem<T>> provider,
         Func<T, TKey> keySelector,
+        GeneratorContext generatorContext,
         IEqualityComparer<TKey>? comparer = null)
     {
-        _context = context;
+        _roslynContext = roslynContext;
         _provider = provider;
         _keySelector = keySelector;
+        _generatorContext = generatorContext;
         _comparer = comparer ?? EqualityComparer<TKey>.Default;
     }
 
     /// <summary>
-    /// Process each group of projected items.
+    /// Generate source code for each group.
+    /// Return (hintName, source) tuple, or null to skip generation for that group.
     /// </summary>
-    public void ForEachGroup(Action<TKey, IReadOnlyList<T>, CollectionEmitter> action)
+    public void Generate(Func<TKey, IReadOnlyList<T>, (string HintName, string Source)?> generator)
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
+        var diagnostics = _generatorContext.Diagnostics;
 
         var collected = _provider.Collect();
 
-        _context.RegisterSourceOutput(collected, (spc, items) =>
+        _generatorContext.AddSourceOutput(collected, (spc, items) =>
         {
             var values = items
                 .Where(i => i.Value is not null)
@@ -322,20 +275,44 @@ public sealed class ProjectedGroupedQuery<TKey, T> where TKey : notnull
 
             var groups = values.GroupBy(keySelector, comparer).ToList();
 
-            var emitter = new CollectionEmitter(spc);
-
             foreach (var group in groups)
             {
                 try
                 {
-                    action(group.Key, group.ToList(), emitter);
+                    var result = generator(group.Key, group.ToList());
+                    if (result is null) continue;
+
+                    var normalizedSource = NormalizeSource(result.Value.Source);
+                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
                 }
                 catch (Exception ex)
                 {
-                    emitter.ReportError("FLUENTGEN504", $"Generator failed for projected group '{group.Key}'", ex.ToString());
+                    spc.ReportDiagnostic(Diagnostic.Create(
+                        diagnostics.UnhandledException,
+                        Location.None,
+                        $"projected group '{group.Key}'",
+                        ex.Message));
                 }
             }
         });
+    }
+
+    static string NormalizeSource(string source)
+    {
+        if (!source.TrimStart().StartsWith("//"))
+        {
+            return $"""
+                // <auto-generated />
+                // This file was auto-generated by FluentSourceGen.
+                // Changes to this file may be lost when the file is regenerated.
+
+                #nullable enable
+
+                {source}
+                """;
+        }
+
+        return source;
     }
 }
 

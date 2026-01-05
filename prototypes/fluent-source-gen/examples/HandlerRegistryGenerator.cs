@@ -32,7 +32,7 @@ namespace Examples;
 [Generator]
 public class HandlerRegistryGenerator : FluentGenerator
 {
-    protected override void Configure(GeneratorContext ctx)
+    protected override void Execute(GeneratorContext ctx)
     {
         // Project handlers to extract their handler type and interface
         ctx.Types
@@ -100,7 +100,7 @@ public class HandlerRegistryGenerator : FluentGenerator
 [Generator]
 public class FlattenedHandlerRegistryGenerator : FluentGenerator
 {
-    protected override void Configure(GeneratorContext ctx)
+    protected override void Execute(GeneratorContext ctx)
     {
         // Use SelectMany to extract all handler interfaces from all types
         ctx.Types
