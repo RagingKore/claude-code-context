@@ -12,9 +12,8 @@ namespace FluentSourceGen;
 /// </summary>
 public sealed class TypeQuery
 {
-    readonly IncrementalGeneratorInitializationContext _context;
-    readonly FileNamingOptions _fileNaming;
-    readonly DiagnosticReporter _diagnostics;
+    readonly IncrementalGeneratorInitializationContext _roslynContext;
+    readonly GeneratorContext _generatorContext;
     readonly List<Func<SyntaxNode, bool>> _syntaxPredicates = [];
     readonly List<Func<INamedTypeSymbol, bool>> _semanticPredicates = [];
     readonly List<string> _attributePatterns = [];
@@ -25,14 +24,10 @@ public sealed class TypeQuery
     bool _requireAllAttributes;
     bool _requireAllInterfaces;
 
-    internal TypeQuery(
-        IncrementalGeneratorInitializationContext context,
-        FileNamingOptions fileNaming,
-        DiagnosticReporter diagnostics)
+    internal TypeQuery(IncrementalGeneratorInitializationContext roslynContext, GeneratorContext generatorContext)
     {
-        _context = context;
-        _fileNaming = fileNaming;
-        _diagnostics = diagnostics;
+        _roslynContext = roslynContext;
+        _generatorContext = generatorContext;
     }
 
     void ApplyPredicate(Func<INamedTypeSymbol, bool> predicate)
@@ -1093,10 +1088,10 @@ public sealed class TypeQuery
     public void Generate(Func<INamedTypeSymbol, string?> generator, string? suffix = null)
     {
         var provider = CreateProvider();
-        var fileNaming = _fileNaming;
-        var diagnostics = _diagnostics;
+        var fileNaming = _generatorContext.FileNaming;
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, result) =>
+        _generatorContext.AddSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null) return;
 
@@ -1136,10 +1131,10 @@ public sealed class TypeQuery
             throw new InvalidOperationException("WithAttribute must be called before using this overload");
 
         var provider = CreateProvider();
-        var fileNaming = _fileNaming;
-        var diagnostics = _diagnostics;
+        var fileNaming = _generatorContext.FileNaming;
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, result) =>
+        _generatorContext.AddSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Attributes.Count == 0) return;
 
@@ -1177,10 +1172,10 @@ public sealed class TypeQuery
             throw new InvalidOperationException("WithAttribute/WithAllAttributes must be called before using this overload");
 
         var provider = CreateProvider();
-        var fileNaming = _fileNaming;
-        var diagnostics = _diagnostics;
+        var fileNaming = _generatorContext.FileNaming;
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, result) =>
+        _generatorContext.AddSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Attributes.Count == 0) return;
 
@@ -1219,10 +1214,10 @@ public sealed class TypeQuery
             throw new InvalidOperationException("Implementing must be called before using this overload");
 
         var provider = CreateProvider();
-        var fileNaming = _fileNaming;
-        var diagnostics = _diagnostics;
+        var fileNaming = _generatorContext.FileNaming;
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, result) =>
+        _generatorContext.AddSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Interfaces.Count == 0) return;
 
@@ -1260,10 +1255,10 @@ public sealed class TypeQuery
             throw new InvalidOperationException("Implementing/ImplementingAll must be called before using this overload");
 
         var provider = CreateProvider();
-        var fileNaming = _fileNaming;
-        var diagnostics = _diagnostics;
+        var fileNaming = _generatorContext.FileNaming;
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, result) =>
+        _generatorContext.AddSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Interfaces.Count == 0) return;
 
@@ -1304,10 +1299,10 @@ public sealed class TypeQuery
             throw new InvalidOperationException("Implementing must be called before using this overload");
 
         var provider = CreateProvider();
-        var fileNaming = _fileNaming;
-        var diagnostics = _diagnostics;
+        var fileNaming = _generatorContext.FileNaming;
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, result) =>
+        _generatorContext.AddSourceOutput(provider, (spc, result) =>
         {
             if (result.Symbol is null || result.Attributes.Count == 0 || result.Interfaces.Count == 0) return;
 
@@ -1347,9 +1342,9 @@ public sealed class TypeQuery
     public void GenerateAll(Func<IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
         var provider = CreateProvider().Collect();
-        var diagnostics = _diagnostics;
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, results) =>
+        _generatorContext.AddSourceOutput(provider, (spc, results) =>
         {
             var symbols = results.Where(r => r.Symbol is not null).Select(r => r.Symbol!).ToList();
             if (symbols.Count == 0) return;
@@ -1383,9 +1378,9 @@ public sealed class TypeQuery
             throw new InvalidOperationException("WithAttribute must be called before using this overload");
 
         var provider = CreateProvider().Collect();
-        var diagnostics = _diagnostics;
+        var diagnostics = _generatorContext.Diagnostics;
 
-        _context.RegisterSourceOutput(provider, (spc, results) =>
+        _generatorContext.AddSourceOutput(provider, (spc, results) =>
         {
             var items = results
                 .Where(r => r.Symbol is not null && r.Attributes.Count > 0)
@@ -1450,7 +1445,7 @@ public sealed class TypeQuery
     /// </example>
     public GroupedTypeQuery<TKey> GroupBy<TKey>(Func<INamedTypeSymbol, TKey> keySelector) where TKey : notnull
     {
-        return new GroupedTypeQuery<TKey>(_context, CreateProvider(), keySelector, _fileNaming, _diagnostics);
+        return new GroupedTypeQuery<TKey>(_roslynContext, CreateProvider(), keySelector, _generatorContext);
     }
 
     /// <summary>
@@ -1458,7 +1453,7 @@ public sealed class TypeQuery
     /// </summary>
     public GroupedTypeQuery<TKey> GroupBy<TKey>(Func<INamedTypeSymbol, TKey> keySelector, IEqualityComparer<TKey> comparer) where TKey : notnull
     {
-        return new GroupedTypeQuery<TKey>(_context, CreateProvider(), keySelector, comparer, _fileNaming, _diagnostics);
+        return new GroupedTypeQuery<TKey>(_roslynContext, CreateProvider(), keySelector, comparer, _generatorContext);
     }
 
     /// <summary>
@@ -1501,7 +1496,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(_context, projected, _fileNaming, _diagnostics);
+        return new ProjectedTypeQuery<T>(_roslynContext, projected, _generatorContext);
     }
 
     /// <summary>
@@ -1518,7 +1513,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new AttributeMatch(result.Attributes[0])))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(_context, projected, _fileNaming, _diagnostics);
+        return new ProjectedTypeQuery<T>(_roslynContext, projected, _generatorContext);
     }
 
     /// <summary>
@@ -1535,7 +1530,7 @@ public sealed class TypeQuery
                 ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new InterfaceMatch(result.Interfaces[0])))
                 : new ProjectedItem<T>(null, default));
 
-        return new ProjectedTypeQuery<T>(_context, projected, _fileNaming, _diagnostics);
+        return new ProjectedTypeQuery<T>(_roslynContext, projected, _generatorContext);
     }
 
     /// <summary>
@@ -1563,7 +1558,7 @@ public sealed class TypeQuery
                 .Select(value => new FlattenedItem<T>(result.Symbol, value));
         });
 
-        return new FlattenedTypeQuery<T>(_context, flattened, _fileNaming, _diagnostics);
+        return new FlattenedTypeQuery<T>(_roslynContext, flattened, _generatorContext);
     }
 
     /// <summary>
@@ -1585,7 +1580,7 @@ public sealed class TypeQuery
                 .Select(value => new FlattenedItem<T>(result.Symbol, value));
         });
 
-        return new FlattenedTypeQuery<T>(_context, flattened);
+        return new FlattenedTypeQuery<T>(_roslynContext, flattened, _generatorContext);
     }
 
     #endregion
@@ -1605,7 +1600,7 @@ public sealed class TypeQuery
         var requireAllAttributes = _requireAllAttributes;
         var requireAllInterfaces = _requireAllInterfaces;
 
-        return _context.SyntaxProvider.CreateSyntaxProvider(
+        return _roslynContext.SyntaxProvider.CreateSyntaxProvider(
             predicate: (node, _) =>
             {
                 if (node is not TypeDeclarationSyntax)
