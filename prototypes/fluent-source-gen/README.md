@@ -294,6 +294,18 @@ ctx.Types
     .InSyntaxTree(tree => /* custom predicate */)
 ```
 
+### Assembly Filters
+
+```csharp
+ctx.Types
+    .InCurrentAssembly()                                // Being compiled (not referenced)
+    .InReferencedAssembly("Newtonsoft.Json")            // Specific referenced assembly
+    .InAssemblyMatching("MyCompany.*")                  // Wildcard pattern
+    .NotInAssembly("System.Private.CoreLib")            // Exclusion
+    .NotInAssemblyMatching("Microsoft.*")               // Exclude pattern
+    .NotInSystemAssemblies()                            // Exclude System.*, Microsoft.*, etc.
+```
+
 ### Negation Modifier
 
 ```csharp
@@ -338,6 +350,106 @@ ctx.Types
 
 // Collect with attributes
 .ForAll((IReadOnlyList<(INamedTypeSymbol, AttributeMatch)> items, CollectionEmitter emit) => { ... });
+```
+
+### Grouping Operations
+
+Group types by key and process each group separately:
+
+```csharp
+// Group by namespace - generate one file per namespace
+ctx.Types
+    .ThatAreClasses()
+    .WithAttribute("ServiceAttribute")
+    .GroupByNamespace()
+    .ForEachGroup((ns, types, emit) =>
+    {
+        var registrations = string.Join("\n",
+            types.Select(t => $"    services.AddScoped<{t.FullName()}>();"));
+
+        emit.Source($"{ns.Replace(".", "/")}/Services.g.cs", $$"""
+            namespace {{ns}};
+
+            public static partial class Services
+            {
+                public static void Register(IServiceCollection services)
+                {
+                    {{registrations}}
+                }
+            }
+            """);
+    });
+
+// Group by custom key
+ctx.Types
+    .ThatAreRecords()
+    .GroupBy(t => t.BaseType?.Name ?? "Object")
+    .ForEachGroup((baseTypeName, types, emit) => { ... });
+
+// Group by assembly
+ctx.Types
+    .Implementing("IPlugin")
+    .GroupByAssembly()
+    .ForEachGroup((assembly, types, emit) => { ... });
+
+// Filter groups
+ctx.Types
+    .GroupByNamespace()
+    .WhereGroup(ns => ns.StartsWith("MyApp."))
+    .ForEachGroup((ns, types, emit) => { ... });
+
+// Order groups
+ctx.Types
+    .GroupByNamespace()
+    .OrderByKey()
+    .ForEachGroup((ns, types, emit) => { ... });
+```
+
+### Projection Operations
+
+Transform types before terminal operations:
+
+```csharp
+// Project to extract specific data
+ctx.Types
+    .ThatAreClasses()
+    .Select(t => new
+    {
+        Type = t,
+        Properties = t.GetMembers().OfType<IPropertySymbol>().ToList(),
+        HasId = t.GetMembers().Any(m => m.Name == "Id")
+    })
+    .ForEach((data, emit) =>
+    {
+        // data.Type, data.Properties, data.HasId available
+    });
+
+// Project with attribute data
+ctx.Types
+    .WithAttribute("TableAttribute")
+    .Select((type, attr) => new
+    {
+        Type = type,
+        TableName = attr.TryGetConstructorArgument<string>(0, out var name) ? name : type.Name
+    })
+    .ForEach((data, emit) => { ... });
+
+// SelectMany - flatten and extract members
+ctx.Types
+    .ThatAreClasses()
+    .SelectMany(t => t.GetMembers().OfType<IPropertySymbol>())
+    .Distinct()
+    .ForAll((allProperties, emit) =>
+    {
+        // Generate based on all properties across all types
+    });
+
+// Chain projections
+ctx.Types
+    .Implementing("IEntity")
+    .Select(t => new { t.Name, Namespace = t.GetNamespace() })
+    .GroupBy(x => x.Namespace)
+    .ForEachGroup((ns, items, emit) => { ... });
 ```
 
 ### Enums
@@ -454,12 +566,14 @@ prototypes/fluent-source-gen/
 ├── src/
 │   └── FluentSourceGen/
 │       ├── FluentGenerator.cs      # Base class and GeneratorContext
-│       ├── TypeQuery.cs            # Fluent query builder (900+ lines)
+│       ├── TypeQuery.cs            # Fluent query builder (1600+ lines)
 │       ├── TypeEnums.cs            # TypeAccessibility, TypeModifiers, TypeKind
 │       ├── AttributeMatch.cs       # Attribute data wrapper
 │       ├── InterfaceMatch.cs       # Interface data wrapper
 │       ├── SourceEmitter.cs        # Code emission and file naming
 │       ├── CollectionEmitter.cs    # Emitter for ForAll operations
+│       ├── GroupedTypeQuery.cs     # Grouping operations (GroupBy, ForEachGroup)
+│       ├── ProjectedTypeQuery.cs   # Projection operations (Select, SelectMany)
 │       └── SymbolExtensions.cs     # INamedTypeSymbol extensions
 ├── tests/
 │   └── FluentSourceGen.Tests/      # TUnit tests
@@ -467,7 +581,9 @@ prototypes/fluent-source-gen/
 │       ├── SymbolExtensionsTests.cs
 │       ├── TypeFilteringTests.cs
 │       ├── MatchWrapperTests.cs
-│       └── FileNamingTests.cs
+│       ├── FileNamingTests.cs
+│       ├── AssemblyFilteringTests.cs
+│       └── GroupingAndProjectionTests.cs
 ├── FluentSourceGen.slnx            # Solution file
 └── README.md                       # This file
 ```

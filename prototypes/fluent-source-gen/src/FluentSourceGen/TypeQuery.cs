@@ -954,6 +954,77 @@ public sealed class TypeQuery
 
     #endregion
 
+    #region Assembly Filters
+
+    /// <summary>
+    /// Filter to types defined in the assembly being compiled (not referenced assemblies).
+    /// </summary>
+    public TypeQuery InCurrentAssembly()
+    {
+        ApplyPredicate(t => SymbolEqualityComparer.Default.Equals(
+            t.ContainingAssembly,
+            t.ContainingModule?.ContainingAssembly));
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types from a referenced assembly with the specified name.
+    /// </summary>
+    public TypeQuery InReferencedAssembly(string assemblyName)
+    {
+        ApplyPredicate(t =>
+            t.ContainingAssembly?.Name.Equals(assemblyName, StringComparison.OrdinalIgnoreCase) == true);
+        return this;
+    }
+
+    /// <summary>
+    /// Filter to types from assemblies matching the specified pattern (supports * wildcard).
+    /// </summary>
+    public TypeQuery InAssemblyMatching(string pattern)
+    {
+        var regex = GlobToRegex(pattern);
+        ApplyPredicate(t =>
+            t.ContainingAssembly?.Name is { } name && regex.IsMatch(name));
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types from assemblies with the specified name.
+    /// </summary>
+    public TypeQuery NotInAssembly(string assemblyName)
+    {
+        ApplyPredicate(t =>
+            t.ContainingAssembly?.Name.Equals(assemblyName, StringComparison.OrdinalIgnoreCase) != true);
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types from assemblies matching the specified pattern.
+    /// </summary>
+    public TypeQuery NotInAssemblyMatching(string pattern)
+    {
+        var regex = GlobToRegex(pattern);
+        ApplyPredicate(t =>
+            t.ContainingAssembly?.Name is not { } name || !regex.IsMatch(name));
+        return this;
+    }
+
+    /// <summary>
+    /// Exclude types from System.* assemblies.
+    /// </summary>
+    public TypeQuery NotInSystemAssemblies()
+    {
+        ApplyPredicate(t =>
+            t.ContainingAssembly?.Name is not { } name ||
+            (!name.StartsWith("System", StringComparison.Ordinal) &&
+             !name.StartsWith("Microsoft", StringComparison.Ordinal) &&
+             !name.Equals("mscorlib", StringComparison.Ordinal) &&
+             !name.Equals("netstandard", StringComparison.Ordinal)));
+        return this;
+    }
+
+    #endregion
+
     #region Low-Level / Raw Access
 
     /// <summary>
@@ -1201,6 +1272,160 @@ public sealed class TypeQuery
                 emitter.ReportError("FLUENTGEN500", "Generator failed", ex.ToString());
             }
         });
+    }
+
+    #endregion
+
+    #region Grouping Operations
+
+    /// <summary>
+    /// Group matching types by a key selector.
+    /// Useful for generating files per namespace, per assembly, or other groupings.
+    /// </summary>
+    /// <example>
+    /// ctx.Types()
+    ///     .WithAttribute("MyAttribute")
+    ///     .GroupBy(t => t.ContainingNamespace.ToDisplayString())
+    ///     .ForEachGroup((ns, types, emit) => { ... });
+    /// </example>
+    public GroupedTypeQuery<TKey> GroupBy<TKey>(Func<INamedTypeSymbol, TKey> keySelector) where TKey : notnull
+    {
+        return new GroupedTypeQuery<TKey>(_context, CreateProvider(), keySelector);
+    }
+
+    /// <summary>
+    /// Group matching types by a key selector with a custom comparer.
+    /// </summary>
+    public GroupedTypeQuery<TKey> GroupBy<TKey>(Func<INamedTypeSymbol, TKey> keySelector, IEqualityComparer<TKey> comparer) where TKey : notnull
+    {
+        return new GroupedTypeQuery<TKey>(_context, CreateProvider(), keySelector, comparer);
+    }
+
+    /// <summary>
+    /// Group matching types by namespace.
+    /// </summary>
+    public GroupedTypeQuery<string> GroupByNamespace()
+    {
+        return GroupBy(t => t.ContainingNamespace.IsGlobalNamespace
+            ? string.Empty
+            : t.ContainingNamespace.ToDisplayString());
+    }
+
+    /// <summary>
+    /// Group matching types by assembly name.
+    /// </summary>
+    public GroupedTypeQuery<string> GroupByAssembly()
+    {
+        return GroupBy(t => t.ContainingAssembly?.Name ?? string.Empty);
+    }
+
+    #endregion
+
+    #region Projection Operations
+
+    /// <summary>
+    /// Project each matching type to a new value.
+    /// Enables extracting specific data from types before terminal operations.
+    /// </summary>
+    /// <example>
+    /// ctx.Types()
+    ///     .Implementing("IEntity")
+    ///     .Select(t => new { t.Name, Properties = t.GetMembers().OfType&lt;IPropertySymbol&gt;().ToList() })
+    ///     .ForEach((data, emit) => { ... });
+    /// </example>
+    public ProjectedTypeQuery<T> Select<T>(Func<INamedTypeSymbol, T> selector)
+    {
+        var provider = CreateProvider();
+        var projected = provider.Select((result, _) =>
+            result.Symbol is not null
+                ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol))
+                : new ProjectedItem<T>(null, default));
+
+        return new ProjectedTypeQuery<T>(_context, projected);
+    }
+
+    /// <summary>
+    /// Project each matching type with attribute data.
+    /// </summary>
+    public ProjectedTypeQuery<T> Select<T>(Func<INamedTypeSymbol, AttributeMatch, T> selector)
+    {
+        if (_attributePatterns.Count == 0)
+            throw new InvalidOperationException("WithAttribute must be called before using this overload");
+
+        var provider = CreateProvider();
+        var projected = provider.Select((result, _) =>
+            result.Symbol is not null && result.Attributes.Count > 0
+                ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new AttributeMatch(result.Attributes[0])))
+                : new ProjectedItem<T>(null, default));
+
+        return new ProjectedTypeQuery<T>(_context, projected);
+    }
+
+    /// <summary>
+    /// Project each matching type with interface data.
+    /// </summary>
+    public ProjectedTypeQuery<T> Select<T>(Func<INamedTypeSymbol, InterfaceMatch, T> selector)
+    {
+        if (_interfacePatterns.Count == 0)
+            throw new InvalidOperationException("Implementing must be called before using this overload");
+
+        var provider = CreateProvider();
+        var projected = provider.Select((result, _) =>
+            result.Symbol is not null && result.Interfaces.Count > 0
+                ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new InterfaceMatch(result.Interfaces[0])))
+                : new ProjectedItem<T>(null, default));
+
+        return new ProjectedTypeQuery<T>(_context, projected);
+    }
+
+    /// <summary>
+    /// Project each matching type to multiple values and flatten.
+    /// Useful for extracting multiple items per type (e.g., all methods, all properties).
+    /// </summary>
+    /// <example>
+    /// ctx.Types()
+    ///     .ThatAreClasses()
+    ///     .SelectMany(t => t.GetMembers().OfType&lt;IPropertySymbol&gt;())
+    ///     .Distinct()
+    ///     .ForAll((properties, emit) => { ... });
+    /// </example>
+    public FlattenedTypeQuery<T> SelectMany<T>(Func<INamedTypeSymbol, IEnumerable<T>> selector)
+    {
+        var provider = CreateProvider();
+
+        // Collect and flatten
+        var flattened = provider.SelectMany((result, _) =>
+        {
+            if (result.Symbol is null)
+                return Enumerable.Empty<FlattenedItem<T>>();
+
+            return selector(result.Symbol)
+                .Select(value => new FlattenedItem<T>(result.Symbol, value));
+        });
+
+        return new FlattenedTypeQuery<T>(_context, flattened);
+    }
+
+    /// <summary>
+    /// Project each matching type with attribute data to multiple values and flatten.
+    /// </summary>
+    public FlattenedTypeQuery<T> SelectMany<T>(Func<INamedTypeSymbol, AttributeMatch, IEnumerable<T>> selector)
+    {
+        if (_attributePatterns.Count == 0)
+            throw new InvalidOperationException("WithAttribute must be called before using this overload");
+
+        var provider = CreateProvider();
+
+        var flattened = provider.SelectMany((result, _) =>
+        {
+            if (result.Symbol is null || result.Attributes.Count == 0)
+                return Enumerable.Empty<FlattenedItem<T>>();
+
+            return selector(result.Symbol, new AttributeMatch(result.Attributes[0]))
+                .Select(value => new FlattenedItem<T>(result.Symbol, value));
+        });
+
+        return new FlattenedTypeQuery<T>(_context, flattened);
     }
 
     #endregion
