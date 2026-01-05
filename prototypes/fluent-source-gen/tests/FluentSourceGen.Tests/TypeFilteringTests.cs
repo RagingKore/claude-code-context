@@ -518,4 +518,187 @@ public class TypeFilteringTests
     }
 
     #endregion
+
+    #region Negation Method Tests
+
+    [Test]
+    public async Task ThatAreNotPartial_FiltersOutPartialTypes()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public partial class PartialClass { }
+            public class NonPartialClass { }
+            public partial struct PartialStruct { }
+            public struct NonPartialStruct { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate ThatAreNotPartial predicate
+        var filtered = types.Where(t =>
+        {
+            var syntax = t.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+            return syntax is not Microsoft.CodeAnalysis.CSharp.Syntax.TypeDeclarationSyntax tds ||
+                   !tds.Modifiers.Any(m => m.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.PartialKeyword));
+        }).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(2);
+        await Assert.That(filtered.Select(t => t.Name)).Contains("NonPartialClass");
+        await Assert.That(filtered.Select(t => t.Name)).Contains("NonPartialStruct");
+    }
+
+    [Test]
+    public async Task ThatAreNotStatic_FiltersOutStaticTypes()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public static class StaticClass { }
+            public class NonStaticClass { }
+            public static class AnotherStaticClass { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate ThatAreNotStatic predicate
+        var filtered = types.Where(t => !t.IsStatic).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(1);
+        await Assert.That(filtered[0].Name).IsEqualTo("NonStaticClass");
+    }
+
+    [Test]
+    public async Task ThatAreNotAbstract_FiltersOutAbstractClasses()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public abstract class AbstractClass { }
+            public class ConcreteClass { }
+            public abstract class AnotherAbstractClass { }
+            public sealed class SealedClass { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate ThatAreNotAbstract predicate (allows interfaces since they're technically abstract)
+        var filtered = types.Where(t => !t.IsAbstract || t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Interface).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(2);
+        await Assert.That(filtered.Select(t => t.Name)).Contains("ConcreteClass");
+        await Assert.That(filtered.Select(t => t.Name)).Contains("SealedClass");
+    }
+
+    [Test]
+    public async Task ThatAreNotAbstract_AllowsInterfaces()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public abstract class AbstractClass { }
+            public interface IMyInterface { }
+            public class ConcreteClass { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate ThatAreNotAbstract predicate
+        var filtered = types.Where(t => !t.IsAbstract || t.TypeKind == Microsoft.CodeAnalysis.TypeKind.Interface).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(2);
+        await Assert.That(filtered.Select(t => t.Name)).Contains("IMyInterface");
+        await Assert.That(filtered.Select(t => t.Name)).Contains("ConcreteClass");
+    }
+
+    [Test]
+    public async Task ThatAreNotSealed_FiltersOutSealedTypes()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public sealed class SealedClass { }
+            public class UnsealedClass { }
+            public sealed class AnotherSealedClass { }
+            public abstract class AbstractClass { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate ThatAreNotSealed predicate
+        var filtered = types.Where(t => !t.IsSealed).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(2);
+        await Assert.That(filtered.Select(t => t.Name)).Contains("UnsealedClass");
+        await Assert.That(filtered.Select(t => t.Name)).Contains("AbstractClass");
+    }
+
+    [Test]
+    public async Task WithoutModifiers_Static_FiltersOutStaticTypes()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public static class StaticClass { }
+            public class RegularClass { }
+            public abstract class AbstractClass { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate WithoutModifiers(TypeModifiers.Static) predicate
+        var filtered = types.Where(t => !t.IsStatic).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(2);
+        await Assert.That(filtered.Select(t => t.Name)).Contains("RegularClass");
+        await Assert.That(filtered.Select(t => t.Name)).Contains("AbstractClass");
+    }
+
+    [Test]
+    public async Task WithoutModifiers_Abstract_FiltersOutAbstractTypes()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public abstract class AbstractClass { }
+            public class ConcreteClass { }
+            public sealed class SealedClass { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate WithoutModifiers(TypeModifiers.Abstract) predicate
+        var filtered = types.Where(t => !t.IsAbstract).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(2);
+        await Assert.That(filtered.Select(t => t.Name)).Contains("ConcreteClass");
+        await Assert.That(filtered.Select(t => t.Name)).Contains("SealedClass");
+    }
+
+    [Test]
+    public async Task WithoutModifiers_Sealed_FiltersOutSealedTypes()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public sealed class SealedClass { }
+            public class RegularClass { }
+            public abstract class AbstractClass { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate WithoutModifiers(TypeModifiers.Sealed) predicate
+        var filtered = types.Where(t => !t.IsSealed).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(2);
+        await Assert.That(filtered.Select(t => t.Name)).Contains("RegularClass");
+        await Assert.That(filtered.Select(t => t.Name)).Contains("AbstractClass");
+    }
+
+    [Test]
+    public async Task WithoutModifiers_Combined_FiltersMultipleModifiers()
+    {
+        var compilation = CompilationHelper.CreateCompilation("""
+            public static class StaticClass { }
+            public abstract class AbstractClass { }
+            public sealed class SealedClass { }
+            public class RegularClass { }
+            """);
+
+        var types = compilation.GetDeclaredTypes().ToList();
+
+        // Simulate WithoutModifiers(TypeModifiers.Static | TypeModifiers.Abstract) predicate
+        var filtered = types.Where(t => !t.IsStatic && !t.IsAbstract).ToList();
+
+        await Assert.That(filtered.Count).IsEqualTo(2);
+        await Assert.That(filtered.Select(t => t.Name)).Contains("SealedClass");
+        await Assert.That(filtered.Select(t => t.Name)).Contains("RegularClass");
+    }
+
+    #endregion
 }
