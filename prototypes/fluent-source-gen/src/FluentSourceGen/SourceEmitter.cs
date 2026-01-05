@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Text;
@@ -67,106 +66,26 @@ public sealed class SourceEmitter
     /// <summary>
     /// Generates a hint name for the type with optional suffix.
     /// </summary>
+    [Obsolete("Use SourceGeneratorFileNaming.GetHintName instead")]
     public static string GenerateHintName(INamedTypeSymbol typeSymbol, string? suffix = null)
     {
-        var typeName = SanitizeFileName(typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)
-            .Replace("global::", ""));
-
+        var hintName = SourceGeneratorFileNaming.GetHintName(typeSymbol, new FileNamingOptions { IncludeHash = false });
         return suffix is not null
-            ? $"{typeName}{suffix}.g.cs"
-            : $"{typeName}.g.cs";
+            ? hintName.Replace(".g.cs", $"{suffix}.g.cs")
+            : hintName;
     }
 
     /// <summary>
     /// Generates a deterministic hint name with configurable options.
     /// </summary>
+    [Obsolete("Use SourceGeneratorFileNaming.GetHintName instead")]
     public static string GenerateHintName(
         INamedTypeSymbol typeSymbol,
         FileNamingOptions options,
         IEnumerable<ITypeSymbol>? typeArgsForHash = null)
     {
-        var hashInput = GenerateHashInput(typeSymbol, typeArgsForHash?.ToList() ?? []);
-        var hash = ComputeStableHash(hashInput);
-        var fileName = BuildFileName(typeSymbol.Name, hash, options);
-        var directoryParts = BuildDirectoryParts(typeSymbol, options);
-
-        return CombinePathParts(directoryParts, fileName, options);
+        return SourceGeneratorFileNaming.GetHintName(typeSymbol, options, typeArgsForHash);
     }
-
-    static string GenerateHashInput(INamedTypeSymbol typeSymbol, List<ITypeSymbol> typeArgs)
-    {
-        if (typeArgs.Count > 0)
-            return string.Join(",", typeArgs.Select(t => t.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)));
-
-        if (typeSymbol is { IsGenericType: true, TypeArguments.Length: > 0 })
-            return string.Join(",", typeSymbol.TypeArguments.Select(t => t.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)));
-
-        return typeSymbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-    }
-
-    static string BuildFileName(string typeName, string hash, FileNamingOptions options)
-    {
-        var name = options.LowercasePath ? typeName.ToLowerInvariant() : typeName;
-        return $"{name}_{hash}.g.cs";
-    }
-
-    static List<string> BuildDirectoryParts(INamedTypeSymbol typeSymbol, FileNamingOptions options)
-    {
-        var parts = new List<string>();
-
-        if (!string.IsNullOrEmpty(options.Prefix) && options.UseFoldersForPrefix)
-        {
-            var prefix = ApplyCasing(options.Prefix!, options.LowercasePath);
-            parts.Add(prefix);
-        }
-
-        if (options.UseFoldersForNamespace)
-        {
-            var namespaceName = typeSymbol.ContainingNamespace.IsGlobalNamespace
-                ? "Global"
-                : typeSymbol.ContainingNamespace.ToDisplayString();
-            var casedNamespace = ApplyCasing(namespaceName, options.LowercasePath);
-            parts.Add(casedNamespace);
-        }
-
-        return parts;
-    }
-
-    static string CombinePathParts(List<string> directoryParts, string fileName, FileNamingOptions options)
-    {
-        if (directoryParts.Count > 0)
-        {
-            var directory = string.Join("/", directoryParts);
-            return $"{directory}/{fileName}";
-        }
-
-        if (!string.IsNullOrEmpty(options.Prefix) && !options.UseFoldersForPrefix)
-        {
-            var prefix = ApplyCasing(options.Prefix!, options.LowercasePath);
-            return $"{prefix}_{fileName}";
-        }
-
-        return fileName;
-    }
-
-    static string ApplyCasing(string value, bool lowercase) =>
-        lowercase ? value.ToLowerInvariant() : value;
-
-    static string ComputeStableHash(string input)
-    {
-        using var md5 = MD5.Create();
-        var hash = md5.ComputeHash(Encoding.UTF8.GetBytes(input));
-        return BitConverter.ToString(hash).Replace("-", "").Substring(0, 8);
-    }
-
-    static string SanitizeFileName(string input) =>
-        input
-            .Replace('.', '_')
-            .Replace('<', '_')
-            .Replace('>', '_')
-            .Replace(',', '_')
-            .Replace(' ', '_')
-            .Replace('+', '_');
 
     #endregion
 
@@ -243,51 +162,4 @@ public sealed class SourceEmitter
     #endregion
 }
 
-/// <summary>
-/// Configuration options for generated file naming.
-/// </summary>
-public sealed class FileNamingOptions
-{
-    /// <summary>
-    /// Gets the default file naming options.
-    /// </summary>
-    public static FileNamingOptions Default { get; } = new()
-    {
-        UseFoldersForNamespace = true,
-        UseFoldersForPrefix = true,
-        LowercasePath = false,
-        Prefix = null
-    };
-
-    /// <summary>
-    /// When true, creates a folder hierarchy for the namespace.
-    /// Default: true
-    /// </summary>
-    public bool UseFoldersForNamespace { get; init; } = true;
-
-    /// <summary>
-    /// When true and Prefix is set, the prefix becomes a folder.
-    /// Default: true
-    /// </summary>
-    public bool UseFoldersForPrefix { get; init; } = true;
-
-    /// <summary>
-    /// When true, converts all path components to lowercase.
-    /// Default: false
-    /// </summary>
-    public bool LowercasePath { get; init; }
-
-    /// <summary>
-    /// Optional prefix for the generated file.
-    /// </summary>
-    public string? Prefix { get; init; }
-
-    /// <summary>
-    /// Creates options with flat file naming (no folders).
-    /// </summary>
-    public static FileNamingOptions Flat => new()
-    {
-        UseFoldersForNamespace = false,
-        UseFoldersForPrefix = false
-    };
-}
+// Note: FileNamingOptions is defined in SourceGeneratorFileNaming.cs

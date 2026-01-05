@@ -46,16 +46,16 @@ public class HandlerRegistryGenerator : FluentGenerator
                 QueryInterface = type.FindInterface("Kurrent.IQueryHandler<>"),
                 IsCommand = type.ImplementsInterface("Kurrent.ICommandHandler<>")
             })
-            .ForAll((handlers, emit) =>
+            .GenerateAll(handlers =>
             {
                 var commandHandlers = handlers
-                    .Where(h => h.IsCommand && h.CommandInterface is not null)
-                    .Select(h => $"services.AddScoped<{h.CommandInterface!.GlobalName()}, {h.Type.GlobalName()}>();")
+                    .Where(h => h.Data.IsCommand && h.Data.CommandInterface is not null)
+                    .Select(h => $"services.AddScoped<{h.Data.CommandInterface!.GlobalName()}, {h.Data.Type.GlobalName()}>();")
                     .ToList();
 
                 var queryHandlers = handlers
-                    .Where(h => !h.IsCommand && h.QueryInterface is not null)
-                    .Select(h => $"services.AddScoped<{h.QueryInterface!.GlobalName()}, {h.Type.GlobalName()}>();")
+                    .Where(h => !h.Data.IsCommand && h.Data.QueryInterface is not null)
+                    .Select(h => $"services.AddScoped<{h.Data.QueryInterface!.GlobalName()}, {h.Data.Type.GlobalName()}>();")
                     .ToList();
 
                 var commandCode = commandHandlers.Count > 0
@@ -66,7 +66,7 @@ public class HandlerRegistryGenerator : FluentGenerator
                     ? "// Query Handlers\n            " + string.Join("\n            ", queryHandlers)
                     : "// No query handlers found";
 
-                emit.Source("HandlerRegistry.g.cs", $$"""
+                return ("HandlerRegistry.g.cs", $$"""
                     using Microsoft.Extensions.DependencyInjection;
 
                     namespace Kurrent.Generated;
@@ -114,16 +114,16 @@ public class FlattenedHandlerRegistryGenerator : FluentGenerator
                     Interface = iface,
                     Kind = iface.Name.StartsWith("ICommand") ? "Command" : "Query"
                 }))
-            .ForAll((registrations, emit) =>
+            .GenerateAll(registrations =>
             {
                 var grouped = registrations
-                    .GroupBy(r => r.Kind)
+                    .GroupBy(r => r.Data.Kind)
                     .ToDictionary(g => g.Key, g => g.ToList());
 
                 var commands = grouped.GetValueOrDefault("Command", []);
                 var queries = grouped.GetValueOrDefault("Query", []);
 
-                emit.Source("FlattenedHandlerRegistry.g.cs", $$"""
+                return ("FlattenedHandlerRegistry.g.cs", $$"""
                     using Microsoft.Extensions.DependencyInjection;
 
                     namespace Kurrent.Generated;
@@ -136,10 +136,10 @@ public class FlattenedHandlerRegistryGenerator : FluentGenerator
                         public static IServiceCollection AddAllHandlers(this IServiceCollection services)
                         {
                             // {{commands.Count}} Command Handlers
-                            {{string.Join("\n            ", commands.Select(c => $"services.AddScoped<{c.Interface.GlobalName()}, {c.Handler.GlobalName()}>();"))}}
+                            {{string.Join("\n            ", commands.Select(c => $"services.AddScoped<{c.Data.Interface.GlobalName()}, {c.Data.Handler.GlobalName()}>();"))}}
 
                             // {{queries.Count}} Query Handlers
-                            {{string.Join("\n            ", queries.Select(q => $"services.AddScoped<{q.Interface.GlobalName()}, {q.Handler.GlobalName()}>();"))}}
+                            {{string.Join("\n            ", queries.Select(q => $"services.AddScoped<{q.Data.Interface.GlobalName()}, {q.Data.Handler.GlobalName()}>();"))}}
 
                             return services;
                         }

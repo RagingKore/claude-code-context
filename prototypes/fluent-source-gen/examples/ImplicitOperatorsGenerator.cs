@@ -28,27 +28,31 @@ namespace Examples;
 [Generator]
 public class ImplicitOperatorsGenerator : FluentGenerator
 {
+    protected override FileNamingOptions FileNaming => new()
+    {
+        Prefix = "ImplicitOperators",
+        UseFoldersForPrefix = true,
+        UseFoldersForNamespace = true
+    };
+
     protected override void Configure(GeneratorContext ctx)
     {
         ctx.Types
             .ThatAreRecords()
             .ThatArePartial()
             .Implementing("Kurrent.IResultBase<>")
-            .ForEach((type, iface, emit) =>
+            .Generate((type, iface) =>
             {
                 if (iface.TypeArgumentCount < 2)
                 {
-                    emit.ReportWarning("IMPL001", "Missing type arguments",
-                        $"Type {type.Name} implements IResultBase but needs exactly 2 type arguments (TValue, TError).");
-                    return;
+                    // TODO: Report diagnostic - for now, skip generation
+                    return null;
                 }
 
                 var valueType = iface.TypeArgument(0);
                 var errorType = iface.TypeArgument(1);
 
-                emit.Source(
-                    new FileNamingOptions { Prefix = "ImplicitOperators" },
-                    $$"""
+                return $$"""
                     {{type.GetNamespaceDeclaration()}}
 
                     {{type.GetModifiers()}} {{type.GetTypeKeyword()}} {{type.Name}}
@@ -81,8 +85,7 @@ public class ImplicitOperatorsGenerator : FluentGenerator
                                 ? result.Error
                                 : throw new InvalidOperationException("Cannot extract error from successful result.");
                     }
-                    """,
-                    valueType, errorType);
+                    """;
             });
     }
 }

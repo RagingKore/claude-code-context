@@ -1105,7 +1105,7 @@ public sealed class TypeQuery
                 var source = generator(result.Symbol);
                 if (source is null) return;
 
-                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
                 if (suffix is not null)
                     hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
 
@@ -1148,7 +1148,7 @@ public sealed class TypeQuery
                 var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]));
                 if (source is null) return;
 
-                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
                 if (suffix is not null)
                     hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
 
@@ -1190,7 +1190,7 @@ public sealed class TypeQuery
                 var source = generator(result.Symbol, matches);
                 if (source is null) return;
 
-                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
                 if (suffix is not null)
                     hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
 
@@ -1231,7 +1231,7 @@ public sealed class TypeQuery
                 var source = generator(result.Symbol, new InterfaceMatch(result.Interfaces[0]));
                 if (source is null) return;
 
-                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
                 if (suffix is not null)
                     hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
 
@@ -1273,7 +1273,7 @@ public sealed class TypeQuery
                 var source = generator(result.Symbol, matches);
                 if (source is null) return;
 
-                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
                 if (suffix is not null)
                     hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
 
@@ -1319,7 +1319,7 @@ public sealed class TypeQuery
                     new InterfaceMatch(result.Interfaces[0]));
                 if (source is null) return;
 
-                var hintName = SourceEmitter.GenerateHintName(result.Symbol, fileNaming);
+                var hintName = SourceGeneratorFileNaming.GetHintName(result.Symbol, fileNaming);
                 if (suffix is not null)
                     hintName = hintName.Replace(".g.cs", $"{suffix}.g.cs");
 

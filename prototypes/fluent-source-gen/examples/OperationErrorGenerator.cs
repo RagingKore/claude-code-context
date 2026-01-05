@@ -38,6 +38,13 @@ namespace Examples;
 [Generator]
 public class OperationErrorGenerator : FluentGenerator
 {
+    protected override FileNamingOptions FileNaming => new()
+    {
+        Prefix = "OperationErrors",
+        UseFoldersForPrefix = true,
+        UseFoldersForNamespace = true
+    };
+
     protected override void Configure(GeneratorContext ctx)
     {
         ctx.Types
@@ -45,22 +52,19 @@ public class OperationErrorGenerator : FluentGenerator
             .ThatArePartial()
             .WithAttribute("Kurrent.GenerateOperationErrorAttribute")
             .Implementing("Kurrent.IOperationError<>")
-            .ForEach((type, attr, iface, emit) =>
+            .Generate((type, attr, iface) =>
             {
                 var variants = iface.TypeArguments;
 
                 if (variants.Count == 0)
                 {
-                    emit.ReportWarning("OPERR001", "No variants",
-                        $"Type {type.Name} implements IOperationError but has no variant type arguments.");
-                    return;
+                    // TODO: Report diagnostic - for now, skip generation
+                    return null;
                 }
 
                 var variantCode = GenerateVariantCode(type, variants);
 
-                emit.Source(
-                    new FileNamingOptions { Prefix = "OperationErrors" },
-                    $$"""
+                return $$"""
                     {{type.GetNamespaceDeclaration()}}
 
                     {{type.GetModifiers()}} {{type.GetTypeKeyword()}} {{type.Name}}
@@ -71,7 +75,7 @@ public class OperationErrorGenerator : FluentGenerator
 
                     {{variantCode}}
                     }
-                    """);
+                    """;
             });
     }
 

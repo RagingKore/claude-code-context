@@ -5,7 +5,7 @@ namespace Examples;
 
 /// <summary>
 /// Generates service registration code for types marked with [AutoRegister].
-/// Uses ForAll to collect all services and generate a single registry file.
+/// Uses GenerateAll to collect all services and generate a single registry file.
 ///
 /// Example usage:
 /// <code>
@@ -37,15 +37,15 @@ public class ServiceRegistryGenerator : FluentGenerator
             .ThatAreNotAbstract()
             .ThatArePublic()
             .WithAttribute("Kurrent.AutoRegisterAttribute")
-            .ForAll((types, attr, emit) =>
+            .GenerateAll(types =>
             {
                 var registrations = types
                     .Select(item => GenerateRegistration(item.Symbol, item.Attribute))
                     .ToList();
 
-                var registrationCode = string.Join("\n        ", registrations);
+                var registrationCode = string.Join("\n            ", registrations);
 
-                emit.Source("ServiceRegistry.g.cs", $$"""
+                return ("ServiceRegistry.g.cs", $$"""
                     using Microsoft.Extensions.DependencyInjection;
 
                     namespace Kurrent.Generated;
@@ -115,9 +115,9 @@ public class NamespacedServiceRegistryGenerator : FluentGenerator
             .ThatArePublic()
             .WithAttribute("Kurrent.AutoRegisterAttribute")
             .GroupByNamespace()
-            .ForEachGroup((ns, types, emit) =>
+            .Generate((ns, types) =>
             {
-                if (string.IsNullOrEmpty(ns)) return;
+                if (string.IsNullOrEmpty(ns)) return null;
 
                 var registrations = types.Select(t =>
                 {
@@ -131,8 +131,9 @@ public class NamespacedServiceRegistryGenerator : FluentGenerator
 
                 var registrationCode = string.Join("\n            ", registrations);
                 var className = ns.Split('.').Last() + "Services";
+                var hintName = SourceGeneratorFileNaming.GetNamespaceGroupHintName(ns, FileNamingOptions.Default);
 
-                emit.Source($"{ns.Replace(".", "/")}/{className}.g.cs", $$"""
+                return (hintName, $$"""
                     using Microsoft.Extensions.DependencyInjection;
 
                     namespace {{ns}};
