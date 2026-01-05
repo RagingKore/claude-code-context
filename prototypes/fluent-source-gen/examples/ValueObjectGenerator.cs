@@ -23,18 +23,23 @@ namespace Examples;
 [Generator]
 public class ValueObjectGenerator : FluentGenerator
 {
+    protected override FileNamingOptions FileNaming => new()
+    {
+        Prefix = "ValueObjects",
+        UseFoldersForPrefix = true,
+        UseFoldersForNamespace = true
+    };
+
     protected override void Configure(GeneratorContext ctx)
     {
         ctx.Types
             .ThatArePartial()
             .WithAttribute("Kurrent.ValueObjectAttribute<>")
-            .ForEach((type, attr, emit) =>
+            .Generate((type, attr) =>
             {
                 var valueType = attr.TypeArgument(0);
 
-                emit.Source(
-                    new FileNamingOptions { Prefix = "ValueObjects" },
-                    $$"""
+                return $$"""
                     {{type.GetNamespaceDeclaration()}}
 
                     {{type.GetModifiers()}} {{type.GetTypeKeyword()}} {{type.Name}}
@@ -46,8 +51,7 @@ public class ValueObjectGenerator : FluentGenerator
 
                         public override string ToString() => Value?.ToString() ?? string.Empty;
                     }
-                    """,
-                    valueType);
+                    """;
             });
     }
 }

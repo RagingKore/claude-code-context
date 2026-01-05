@@ -1,4 +1,6 @@
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Text;
+using System.Text;
 
 namespace FluentSourceGen;
 
@@ -9,11 +11,23 @@ namespace FluentSourceGen;
 public abstract class FluentGenerator : IIncrementalGenerator
 {
     /// <summary>
+    /// Gets the file naming options for this generator.
+    /// Override to customize how generated files are named.
+    /// </summary>
+    protected virtual FileNamingOptions FileNaming => FileNamingOptions.Default;
+
+    /// <summary>
+    /// Gets the diagnostic ID prefix for this generator (e.g., "FSG").
+    /// Override to use a custom prefix for your generator's diagnostics.
+    /// </summary>
+    protected virtual string DiagnosticIdPrefix => "FSG";
+
+    /// <summary>
     /// Called by Roslyn to initialize the generator.
     /// </summary>
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var generatorContext = new GeneratorContext(context);
+        var generatorContext = new GeneratorContext(context, FileNaming, DiagnosticIdPrefix);
         Configure(generatorContext);
     }
 
@@ -31,9 +45,14 @@ public sealed class GeneratorContext
 {
     readonly IncrementalGeneratorInitializationContext _context;
 
-    internal GeneratorContext(IncrementalGeneratorInitializationContext context)
+    internal GeneratorContext(
+        IncrementalGeneratorInitializationContext context,
+        FileNamingOptions fileNaming,
+        string diagnosticIdPrefix)
     {
         _context = context;
+        FileNaming = fileNaming;
+        Diagnostics = new DiagnosticReporter(diagnosticIdPrefix);
     }
 
     /// <summary>
@@ -42,9 +61,19 @@ public sealed class GeneratorContext
     public IncrementalGeneratorInitializationContext RoslynContext => _context;
 
     /// <summary>
+    /// Gets the file naming options configured for this generator.
+    /// </summary>
+    public FileNamingOptions FileNaming { get; }
+
+    /// <summary>
+    /// Gets the diagnostic reporter for reporting errors, warnings, and info.
+    /// </summary>
+    public DiagnosticReporter Diagnostics { get; }
+
+    /// <summary>
     /// Starts a fluent query to find and process types.
     /// </summary>
-    public TypeQuery Types => new(_context);
+    public TypeQuery Types => new(_context, FileNaming, Diagnostics);
 
     /// <summary>
     /// Registers a post-initialization output (e.g., marker attributes).
@@ -56,4 +85,52 @@ public sealed class GeneratorContext
         _context.RegisterPostInitializationOutput(ctx =>
             ctx.AddSource(hintName, source));
     }
+}
+
+/// <summary>
+/// Provides methods for reporting diagnostics during source generation.
+/// </summary>
+public sealed class DiagnosticReporter
+{
+    readonly string _idPrefix;
+    int _errorCounter;
+    int _warningCounter;
+    int _infoCounter;
+
+    internal DiagnosticReporter(string idPrefix)
+    {
+        _idPrefix = idPrefix;
+    }
+
+    /// <summary>
+    /// Creates an error diagnostic descriptor.
+    /// </summary>
+    public DiagnosticDescriptor Error(string id, string title, string messageFormat) =>
+        new($"{_idPrefix}{id}", title, messageFormat, "FluentSourceGen",
+            DiagnosticSeverity.Error, isEnabledByDefault: true);
+
+    /// <summary>
+    /// Creates a warning diagnostic descriptor.
+    /// </summary>
+    public DiagnosticDescriptor Warning(string id, string title, string messageFormat) =>
+        new($"{_idPrefix}{id}", title, messageFormat, "FluentSourceGen",
+            DiagnosticSeverity.Warning, isEnabledByDefault: true);
+
+    /// <summary>
+    /// Creates an info diagnostic descriptor.
+    /// </summary>
+    public DiagnosticDescriptor Info(string id, string title, string messageFormat) =>
+        new($"{_idPrefix}{id}", title, messageFormat, "FluentSourceGen",
+            DiagnosticSeverity.Info, isEnabledByDefault: true);
+
+    /// <summary>
+    /// Creates a diagnostic for an unhandled exception during generation.
+    /// </summary>
+    internal DiagnosticDescriptor UnhandledException { get; } = new(
+        "FSG0001",
+        "Source generation failed",
+        "An error occurred while generating source for '{0}': {1}",
+        "FluentSourceGen",
+        DiagnosticSeverity.Error,
+        isEnabledByDefault: true);
 }

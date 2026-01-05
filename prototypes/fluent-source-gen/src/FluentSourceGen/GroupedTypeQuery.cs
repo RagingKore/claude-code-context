@@ -1,4 +1,6 @@
+using System.Text;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Text;
 
 namespace FluentSourceGen;
 
@@ -13,27 +15,49 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     readonly IncrementalValuesProvider<TypeQuery.QueryResult> _provider;
     readonly Func<INamedTypeSymbol, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
+    readonly FileNamingOptions _fileNaming;
+    readonly DiagnosticReporter _diagnostics;
 
     internal GroupedTypeQuery(
         IncrementalGeneratorInitializationContext context,
         IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, TKey> keySelector,
-        IEqualityComparer<TKey>? comparer = null)
+        FileNamingOptions fileNaming,
+        DiagnosticReporter diagnostics)
     {
         _context = context;
         _provider = provider;
         _keySelector = keySelector;
-        _comparer = comparer ?? EqualityComparer<TKey>.Default;
+        _comparer = EqualityComparer<TKey>.Default;
+        _fileNaming = fileNaming;
+        _diagnostics = diagnostics;
+    }
+
+    internal GroupedTypeQuery(
+        IncrementalGeneratorInitializationContext context,
+        IncrementalValuesProvider<TypeQuery.QueryResult> provider,
+        Func<INamedTypeSymbol, TKey> keySelector,
+        IEqualityComparer<TKey> comparer,
+        FileNamingOptions fileNaming,
+        DiagnosticReporter diagnostics)
+    {
+        _context = context;
+        _provider = provider;
+        _keySelector = keySelector;
+        _comparer = comparer;
+        _fileNaming = fileNaming;
+        _diagnostics = diagnostics;
     }
 
     /// <summary>
-    /// Process each group of types. Each group shares the same key value.
+    /// Generate source code for each group.
+    /// Return (hintName, source) tuple, or null to skip generation for that group.
     /// </summary>
-    /// <param name="action">Action to execute for each group with key, types, and emitter.</param>
-    public void ForEachGroup(Action<TKey, IReadOnlyList<INamedTypeSymbol>, CollectionEmitter> action)
+    public void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
+        var diagnostics = _diagnostics;
 
         var collected = _provider.Collect();
 
@@ -50,29 +74,36 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
                 .GroupBy(keySelector, comparer)
                 .ToList();
 
-            var emitter = new CollectionEmitter(spc);
-
             foreach (var group in groups)
             {
                 try
                 {
-                    action(group.Key, group.ToList(), emitter);
+                    var result = generator(group.Key, group.ToList());
+                    if (result is null) continue;
+
+                    var normalizedSource = NormalizeSource(result.Value.Source);
+                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
                 }
                 catch (Exception ex)
                 {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
+                    spc.ReportDiagnostic(Diagnostic.Create(
+                        diagnostics.UnhandledException,
+                        Location.None,
+                        $"group '{group.Key}'",
+                        ex.Message));
                 }
             }
         });
     }
 
     /// <summary>
-    /// Process each group with attribute data.
+    /// Generate source code for each group with attribute data.
     /// </summary>
-    public void ForEachGroup(Action<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, CollectionEmitter> action)
+    public void Generate(Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
+        var diagnostics = _diagnostics;
 
         var collected = _provider.Collect();
 
@@ -89,29 +120,36 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
                 .GroupBy(x => keySelector(x.Symbol), comparer)
                 .ToList();
 
-            var emitter = new CollectionEmitter(spc);
-
             foreach (var group in groups)
             {
                 try
                 {
-                    action(group.Key, group.ToList(), emitter);
+                    var result = generator(group.Key, group.ToList());
+                    if (result is null) continue;
+
+                    var normalizedSource = NormalizeSource(result.Value.Source);
+                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
                 }
                 catch (Exception ex)
                 {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
+                    spc.ReportDiagnostic(Diagnostic.Create(
+                        diagnostics.UnhandledException,
+                        Location.None,
+                        $"group '{group.Key}'",
+                        ex.Message));
                 }
             }
         });
     }
 
     /// <summary>
-    /// Process each group with interface data.
+    /// Generate source code for each group with interface data.
     /// </summary>
-    public void ForEachGroup(Action<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, InterfaceMatch Interface)>, CollectionEmitter> action)
+    public void Generate(Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, InterfaceMatch Interface)>, (string HintName, string Source)?> generator)
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
+        var diagnostics = _diagnostics;
 
         var collected = _provider.Collect();
 
@@ -128,17 +166,23 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
                 .GroupBy(x => keySelector(x.Symbol), comparer)
                 .ToList();
 
-            var emitter = new CollectionEmitter(spc);
-
             foreach (var group in groups)
             {
                 try
                 {
-                    action(group.Key, group.ToList(), emitter);
+                    var result = generator(group.Key, group.ToList());
+                    if (result is null) continue;
+
+                    var normalizedSource = NormalizeSource(result.Value.Source);
+                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
                 }
                 catch (Exception ex)
                 {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
+                    spc.ReportDiagnostic(Diagnostic.Create(
+                        diagnostics.UnhandledException,
+                        Location.None,
+                        $"group '{group.Key}'",
+                        ex.Message));
                 }
             }
         });
@@ -149,8 +193,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public GroupedTypeQuery<TKey> WhereGroup(Func<TKey, bool> predicate)
     {
-        // Return a new grouped query that filters groups
-        return new FilteredGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, predicate);
+        return new FilteredGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, _fileNaming, _diagnostics, predicate);
     }
 
     /// <summary>
@@ -158,7 +201,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public OrderedGroupedTypeQuery<TKey> OrderByKey()
     {
-        return new OrderedGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, ascending: true);
+        return new OrderedGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, _fileNaming, _diagnostics, ascending: true);
     }
 
     /// <summary>
@@ -166,7 +209,25 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// </summary>
     public OrderedGroupedTypeQuery<TKey> OrderByKeyDescending()
     {
-        return new OrderedGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, ascending: false);
+        return new OrderedGroupedTypeQuery<TKey>(_context, _provider, _keySelector, _comparer, _fileNaming, _diagnostics, ascending: false);
+    }
+
+    static string NormalizeSource(string source)
+    {
+        if (!source.TrimStart().StartsWith("//"))
+        {
+            return $"""
+                // <auto-generated />
+                // This file was auto-generated by FluentSourceGen.
+                // Changes to this file may be lost when the file is regenerated.
+
+                #nullable enable
+
+                {source}
+                """;
+        }
+
+        return source;
     }
 }
 
@@ -180,30 +241,35 @@ internal sealed class FilteredGroupedTypeQuery<TKey> : GroupedTypeQuery<TKey> wh
     readonly IncrementalValuesProvider<TypeQuery.QueryResult> _provider;
     readonly Func<INamedTypeSymbol, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
+    readonly DiagnosticReporter _diagnostics;
 
     internal FilteredGroupedTypeQuery(
         IncrementalGeneratorInitializationContext context,
         IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, TKey> keySelector,
         IEqualityComparer<TKey> comparer,
+        FileNamingOptions fileNaming,
+        DiagnosticReporter diagnostics,
         Func<TKey, bool> groupPredicate)
-        : base(context, provider, keySelector, comparer)
+        : base(context, provider, keySelector, comparer, fileNaming, diagnostics)
     {
         _context = context;
         _provider = provider;
         _keySelector = keySelector;
         _comparer = comparer;
+        _diagnostics = diagnostics;
         _groupPredicate = groupPredicate;
     }
 
     /// <summary>
-    /// Process each group that passes the filter.
+    /// Generate source code for each group that passes the filter.
     /// </summary>
-    public new void ForEachGroup(Action<TKey, IReadOnlyList<INamedTypeSymbol>, CollectionEmitter> action)
+    public new void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
         var groupPredicate = _groupPredicate;
+        var diagnostics = _diagnostics;
 
         var collected = _provider.Collect();
 
@@ -221,20 +287,44 @@ internal sealed class FilteredGroupedTypeQuery<TKey> : GroupedTypeQuery<TKey> wh
                 .Where(g => groupPredicate(g.Key))
                 .ToList();
 
-            var emitter = new CollectionEmitter(spc);
-
             foreach (var group in groups)
             {
                 try
                 {
-                    action(group.Key, group.ToList(), emitter);
+                    var result = generator(group.Key, group.ToList());
+                    if (result is null) continue;
+
+                    var normalizedSource = NormalizeSource(result.Value.Source);
+                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
                 }
                 catch (Exception ex)
                 {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
+                    spc.ReportDiagnostic(Diagnostic.Create(
+                        diagnostics.UnhandledException,
+                        Location.None,
+                        $"group '{group.Key}'",
+                        ex.Message));
                 }
             }
         });
+    }
+
+    static string NormalizeSource(string source)
+    {
+        if (!source.TrimStart().StartsWith("//"))
+        {
+            return $"""
+                // <auto-generated />
+                // This file was auto-generated by FluentSourceGen.
+                // Changes to this file may be lost when the file is regenerated.
+
+                #nullable enable
+
+                {source}
+                """;
+        }
+
+        return source;
     }
 }
 
@@ -247,6 +337,7 @@ public sealed class OrderedGroupedTypeQuery<TKey> where TKey : notnull
     readonly IncrementalValuesProvider<TypeQuery.QueryResult> _provider;
     readonly Func<INamedTypeSymbol, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
+    readonly DiagnosticReporter _diagnostics;
     readonly bool _ascending;
 
     internal OrderedGroupedTypeQuery(
@@ -254,23 +345,27 @@ public sealed class OrderedGroupedTypeQuery<TKey> where TKey : notnull
         IncrementalValuesProvider<TypeQuery.QueryResult> provider,
         Func<INamedTypeSymbol, TKey> keySelector,
         IEqualityComparer<TKey> comparer,
+        FileNamingOptions fileNaming,
+        DiagnosticReporter diagnostics,
         bool ascending)
     {
         _context = context;
         _provider = provider;
         _keySelector = keySelector;
         _comparer = comparer;
+        _diagnostics = diagnostics;
         _ascending = ascending;
     }
 
     /// <summary>
-    /// Process each group in order.
+    /// Generate source code for each group in order.
     /// </summary>
-    public void ForEachGroup(Action<TKey, IReadOnlyList<INamedTypeSymbol>, CollectionEmitter> action)
+    public void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
     {
         var keySelector = _keySelector;
         var comparer = _comparer;
         var ascending = _ascending;
+        var diagnostics = _diagnostics;
 
         var collected = _provider.Collect();
 
@@ -289,19 +384,43 @@ public sealed class OrderedGroupedTypeQuery<TKey> where TKey : notnull
                 ? rawGroups.OrderBy(g => g.Key).ToList()
                 : rawGroups.OrderByDescending(g => g.Key).ToList();
 
-            var emitter = new CollectionEmitter(spc);
-
             foreach (var group in groups)
             {
                 try
                 {
-                    action(group.Key, group.ToList(), emitter);
+                    var result = generator(group.Key, group.ToList());
+                    if (result is null) continue;
+
+                    var normalizedSource = NormalizeSource(result.Value.Source);
+                    spc.AddSource(result.Value.HintName, SourceText.From(normalizedSource, Encoding.UTF8));
                 }
                 catch (Exception ex)
                 {
-                    emitter.ReportError("FLUENTGEN501", $"Generator failed for group '{group.Key}'", ex.ToString());
+                    spc.ReportDiagnostic(Diagnostic.Create(
+                        diagnostics.UnhandledException,
+                        Location.None,
+                        $"group '{group.Key}'",
+                        ex.Message));
                 }
             }
         });
+    }
+
+    static string NormalizeSource(string source)
+    {
+        if (!source.TrimStart().StartsWith("//"))
+        {
+            return $"""
+                // <auto-generated />
+                // This file was auto-generated by FluentSourceGen.
+                // Changes to this file may be lost when the file is regenerated.
+
+                #nullable enable
+
+                {source}
+                """;
+        }
+
+        return source;
     }
 }
