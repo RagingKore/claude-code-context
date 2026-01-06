@@ -306,8 +306,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery DerivedFrom(string baseTypeFullName)
     {
-        var pattern = NormalizeTypeName(baseTypeFullName);
-        ApplyPredicate(t => IsDerivedFrom(t, pattern, transitive: true));
+        ApplyPredicate(t => IsDerivedFrom(t, baseTypeFullName, transitive: true));
         return this;
     }
 
@@ -324,8 +323,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery DirectlyDerivedFrom(string baseTypeFullName)
     {
-        var pattern = NormalizeTypeName(baseTypeFullName);
-        ApplyPredicate(t => IsDerivedFrom(t, pattern, transitive: false));
+        ApplyPredicate(t => IsDerivedFrom(t, baseTypeFullName, transitive: false));
         return this;
     }
 
@@ -342,8 +340,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery NotDerivedFrom(string baseTypeFullName)
     {
-        var pattern = NormalizeTypeName(baseTypeFullName);
-        ApplyPredicate(t => !IsDerivedFrom(t, pattern, transitive: true));
+        ApplyPredicate(t => !IsDerivedFrom(t, baseTypeFullName, transitive: true));
         return this;
     }
 
@@ -434,9 +431,8 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery WithPropertyOfType(string typeFullName)
     {
-        var pattern = NormalizeTypeName(typeFullName);
         ApplyPredicate(t => t.GetMembers().OfType<IPropertySymbol>()
-            .Any(p => MatchesTypeName(p.Type.ToDisplayString(), pattern)));
+            .Any(p => MatchesTypeName(p.Type.ToDisplayString(), typeFullName)));
         return this;
     }
 
@@ -610,7 +606,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery WithAttribute(string attributeFullName)
     {
-        _attributePatterns.Add(NormalizeTypeName(attributeFullName));
+        _attributePatterns.Add(attributeFullName);
         _syntaxPredicates.Add(static node =>
             node is TypeDeclarationSyntax tds && tds.AttributeLists.Count > 0);
         return this;
@@ -630,7 +626,7 @@ public sealed class TypeQuery
     public TypeQuery WithAnyAttribute(params string[] attributeFullNames)
     {
         foreach (var name in attributeFullNames)
-            _attributePatterns.Add(NormalizeTypeName(name));
+            _attributePatterns.Add(name);
 
         _requireAllAttributes = false;
         _syntaxPredicates.Add(static node =>
@@ -644,7 +640,7 @@ public sealed class TypeQuery
     public TypeQuery WithAllAttributes(params string[] attributeFullNames)
     {
         foreach (var name in attributeFullNames)
-            _attributePatterns.Add(NormalizeTypeName(name));
+            _attributePatterns.Add(name);
 
         _requireAllAttributes = true;
         _syntaxPredicates.Add(static node =>
@@ -657,7 +653,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery WithoutAttribute(string attributeFullName)
     {
-        _excludedAttributePatterns.Add(NormalizeTypeName(attributeFullName));
+        _excludedAttributePatterns.Add(attributeFullName);
         return this;
     }
 
@@ -674,11 +670,10 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery WithAttributeWhere(string attributeFullName, Func<AttributeData, bool> predicate)
     {
-        var pattern = NormalizeTypeName(attributeFullName);
-        _attributePatterns.Add(pattern);
+        _attributePatterns.Add(attributeFullName);
         ApplyPredicate(t =>
         {
-            var attr = FindMatchingAttribute(t, pattern);
+            var attr = FindMatchingAttribute(t, attributeFullName);
             return attr is not null && predicate(attr);
         });
         _syntaxPredicates.Add(static node =>
@@ -705,7 +700,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery Implementing(string interfaceFullName)
     {
-        _interfacePatterns.Add(NormalizeTypeName(interfaceFullName));
+        _interfacePatterns.Add(interfaceFullName);
         return this;
     }
 
@@ -723,7 +718,7 @@ public sealed class TypeQuery
     public TypeQuery ImplementingAny(params string[] interfaceFullNames)
     {
         foreach (var name in interfaceFullNames)
-            _interfacePatterns.Add(NormalizeTypeName(name));
+            _interfacePatterns.Add(name);
 
         _requireAllInterfaces = false;
         return this;
@@ -735,7 +730,7 @@ public sealed class TypeQuery
     public TypeQuery ImplementingAll(params string[] interfaceFullNames)
     {
         foreach (var name in interfaceFullNames)
-            _interfacePatterns.Add(NormalizeTypeName(name));
+            _interfacePatterns.Add(name);
 
         _requireAllInterfaces = true;
         return this;
@@ -746,7 +741,7 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery NotImplementing(string interfaceFullName)
     {
-        _excludedInterfacePatterns.Add(NormalizeTypeName(interfaceFullName));
+        _excludedInterfacePatterns.Add(interfaceFullName);
         return this;
     }
 
@@ -763,12 +758,11 @@ public sealed class TypeQuery
     /// </summary>
     public TypeQuery DirectlyImplementing(string interfaceFullName)
     {
-        var pattern = NormalizeTypeName(interfaceFullName);
         ApplyPredicate(t =>
         {
             foreach (var iface in t.Interfaces) // Interfaces, not AllInterfaces
             {
-                if (MatchesTypeName(iface.OriginalDefinition.ToDisplayString(), pattern))
+                if (MatchesTypeName(iface.OriginalDefinition.ToDisplayString(), interfaceFullName))
                     return true;
             }
             return false;
@@ -1625,7 +1619,6 @@ public sealed class TypeQuery
         return false;
     }
 
-    static string NormalizeTypeName(string name) => name;
 
     static Regex GlobToRegex(string pattern)
     {

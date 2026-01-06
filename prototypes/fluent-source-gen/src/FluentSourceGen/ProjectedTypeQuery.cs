@@ -405,15 +405,13 @@ public readonly struct ProjectedGroup<TKey, T>
     /// <summary>
     /// The values in this group.
     /// </summary>
-    public IReadOnlyList<T> Values => Items
-        .Where(i => i.Value is not null)
-        .Select(i => i.Value!)
-        .ToList();
+    public IReadOnlyList<T> Values { get; }
 
     internal ProjectedGroup(TKey key, IReadOnlyList<ProjectedItem<T>> items)
     {
         Key = key;
         Items = items;
+        Values = items.Where(i => i.Value is not null).Select(i => i.Value!).ToList();
     }
 }
 
