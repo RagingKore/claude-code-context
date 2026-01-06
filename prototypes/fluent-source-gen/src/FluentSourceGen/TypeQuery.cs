@@ -432,7 +432,7 @@ public sealed class TypeQuery
     public TypeQuery WithPropertyOfType(string typeFullName)
     {
         ApplyPredicate(t => t.GetMembers().OfType<IPropertySymbol>()
-            .Any(p => MatchesTypeName(p.Type.ToDisplayString(), typeFullName)));
+            .Any(p => SymbolExtensions.MatchesTypeName(p.Type.ToDisplayString(), typeFullName)));
         return this;
     }
 
@@ -762,7 +762,7 @@ public sealed class TypeQuery
         {
             foreach (var iface in t.Interfaces) // Interfaces, not AllInterfaces
             {
-                if (MatchesTypeName(iface.OriginalDefinition.ToDisplayString(), interfaceFullName))
+                if (SymbolExtensions.MatchesTypeName(iface.OriginalDefinition.ToDisplayString(), interfaceFullName))
                     return true;
             }
             return false;
@@ -1556,7 +1556,7 @@ public sealed class TypeQuery
             var current = symbol.BaseType;
             while (current is not null)
             {
-                if (MatchesTypeName(current.OriginalDefinition.ToDisplayString(), pattern))
+                if (SymbolExtensions.MatchesTypeName(current.OriginalDefinition.ToDisplayString(), pattern))
                     return true;
                 current = current.BaseType;
             }
@@ -1564,7 +1564,7 @@ public sealed class TypeQuery
         else
         {
             if (symbol.BaseType is not null &&
-                MatchesTypeName(symbol.BaseType.OriginalDefinition.ToDisplayString(), pattern))
+                SymbolExtensions.MatchesTypeName(symbol.BaseType.OriginalDefinition.ToDisplayString(), pattern))
                 return true;
         }
 
@@ -1580,7 +1580,7 @@ public sealed class TypeQuery
 
             var attrFullName = attrClass.OriginalDefinition.ToDisplayString();
 
-            if (MatchesTypeName(attrFullName, pattern))
+            if (SymbolExtensions.MatchesTypeName(attrFullName, pattern))
                 return attr;
         }
 
@@ -1593,55 +1593,13 @@ public sealed class TypeQuery
         {
             var ifaceFullName = iface.OriginalDefinition.ToDisplayString();
 
-            if (MatchesTypeName(ifaceFullName, pattern))
+            if (SymbolExtensions.MatchesTypeName(ifaceFullName, pattern))
                 return iface;
         }
 
         return null;
     }
 
-    static bool MatchesTypeName(string actualName, string pattern)
-    {
-        // Normalize: strip global:: prefix
-        if (actualName.StartsWith("global::", StringComparison.Ordinal))
-            actualName = actualName.Substring(8);
-        if (pattern.StartsWith("global::", StringComparison.Ordinal))
-            pattern = pattern.Substring(8);
-
-        // Exact match
-        if (actualName == pattern)
-            return true;
-
-        // Extract base names (before generic args)
-        var actualBase = actualName.Contains('<')
-            ? actualName.Substring(0, actualName.IndexOf('<'))
-            : actualName;
-        var patternBase = pattern.Contains('<')
-            ? pattern.Substring(0, pattern.IndexOf('<'))
-            : pattern;
-
-        // Generic pattern matching: "MyType<>" or "MyType<,>" matches "MyType<T>" or "MyType<T,U>"
-        if (pattern.Contains('<') && patternBase == actualBase)
-            return true;
-
-        // Short name matching: "MyType" matches "Namespace.MyType"
-        var actualShortName = actualBase.Contains('.')
-            ? actualBase.Substring(actualBase.LastIndexOf('.') + 1)
-            : actualBase;
-
-        if (patternBase == actualShortName)
-            return true;
-
-        // Attribute suffix matching: "Serializable" matches "SerializableAttribute"
-        if (actualShortName.EndsWith("Attribute", StringComparison.Ordinal))
-        {
-            var withoutSuffix = actualShortName.Substring(0, actualShortName.Length - 9);
-            if (patternBase == withoutSuffix || patternBase.EndsWith("." + withoutSuffix))
-                return true;
-        }
-
-        return false;
-    }
 
 
     static Regex GlobToRegex(string pattern)
