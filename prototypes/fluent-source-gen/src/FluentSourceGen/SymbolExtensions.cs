@@ -211,7 +211,7 @@ public static class SymbolExtensions
         {
             var ifaceName = iface.OriginalDefinition.ToDisplayString();
 
-            if (MatchesPattern(ifaceName, interfacePattern))
+            if (MatchesTypeName(ifaceName, interfacePattern))
                 return iface;
         }
 
@@ -240,7 +240,7 @@ public static class SymbolExtensions
 
             var attrName = attrClass.OriginalDefinition.ToDisplayString();
 
-            if (MatchesPattern(attrName, attributePattern))
+            if (MatchesTypeName(attrName, attributePattern))
                 return attr;
         }
 
@@ -255,22 +255,56 @@ public static class SymbolExtensions
 
     #endregion
 
-    #region Helpers
+    #region Type Name Matching
 
-    static bool MatchesPattern(string actualName, string pattern)
+    /// <summary>
+    /// Matches a type name against a pattern with smart normalization.
+    /// Supports: short names, generic patterns, attribute suffix, global:: prefix.
+    /// </summary>
+    /// <example>
+    /// MatchesTypeName("System.SerializableAttribute", "Serializable") // true
+    /// MatchesTypeName("MyNamespace.MyType", "MyType") // true
+    /// MatchesTypeName("MyType&lt;T&gt;", "MyType&lt;&gt;") // true
+    /// MatchesTypeName("global::MyNamespace.Foo", "MyNamespace.Foo") // true
+    /// </example>
+    public static bool MatchesTypeName(string actualName, string pattern)
     {
+        // Normalize: strip global:: prefix
+        if (actualName.StartsWith("global::", StringComparison.Ordinal))
+            actualName = actualName.Substring(8);
+        if (pattern.StartsWith("global::", StringComparison.Ordinal))
+            pattern = pattern.Substring(8);
+
+        // Exact match
         if (actualName == pattern)
             return true;
 
-        // Generic pattern matching: "MyType<>" matches "MyType<T>"
-        if (pattern.Contains('<'))
-        {
-            var patternBase = pattern.Substring(0, pattern.IndexOf('<'));
-            var actualBase = actualName.Contains('<')
-                ? actualName.Substring(0, actualName.IndexOf('<'))
-                : actualName;
+        // Extract base names (before generic args)
+        var actualBase = actualName.Contains('<')
+            ? actualName.Substring(0, actualName.IndexOf('<'))
+            : actualName;
+        var patternBase = pattern.Contains('<')
+            ? pattern.Substring(0, pattern.IndexOf('<'))
+            : pattern;
 
-            return patternBase == actualBase;
+        // Generic pattern matching: "MyType<>" or "MyType<,>" matches "MyType<T>" or "MyType<T,U>"
+        if (pattern.Contains('<') && patternBase == actualBase)
+            return true;
+
+        // Short name matching: "MyType" matches "Namespace.MyType"
+        var actualShortName = actualBase.Contains('.')
+            ? actualBase.Substring(actualBase.LastIndexOf('.') + 1)
+            : actualBase;
+
+        if (patternBase == actualShortName)
+            return true;
+
+        // Attribute suffix matching: "Serializable" matches "SerializableAttribute"
+        if (actualShortName.EndsWith("Attribute", StringComparison.Ordinal))
+        {
+            var withoutSuffix = actualShortName.Substring(0, actualShortName.Length - 9);
+            if (patternBase == withoutSuffix || patternBase.EndsWith("." + withoutSuffix))
+                return true;
         }
 
         return false;

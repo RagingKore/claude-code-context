@@ -49,13 +49,13 @@ public class HandlerRegistryGenerator : FluentGenerator
             .GenerateAll(handlers =>
             {
                 var commandHandlers = handlers
-                    .Where(h => h.Data.IsCommand && h.Data.CommandInterface is not null)
-                    .Select(h => $"services.AddScoped<{h.Data.CommandInterface!.GlobalName()}, {h.Data.Type.GlobalName()}>();")
+                    .Where(h => h.IsCommand && h.CommandInterface is not null)
+                    .Select(h => $"services.AddScoped<{h.CommandInterface!.GlobalName()}, {h.Type.GlobalName()}>();")
                     .ToList();
 
                 var queryHandlers = handlers
-                    .Where(h => !h.Data.IsCommand && h.Data.QueryInterface is not null)
-                    .Select(h => $"services.AddScoped<{h.Data.QueryInterface!.GlobalName()}, {h.Data.Type.GlobalName()}>();")
+                    .Where(h => !h.IsCommand && h.QueryInterface is not null)
+                    .Select(h => $"services.AddScoped<{h.QueryInterface!.GlobalName()}, {h.Type.GlobalName()}>();")
                     .ToList();
 
                 var commandCode = commandHandlers.Count > 0
@@ -117,7 +117,7 @@ public class FlattenedHandlerRegistryGenerator : FluentGenerator
             .GenerateAll(registrations =>
             {
                 var grouped = registrations
-                    .GroupBy(r => r.Data.Kind)
+                    .GroupBy(r => r.Kind)
                     .ToDictionary(g => g.Key, g => g.ToList());
 
                 var commands = grouped.GetValueOrDefault("Command", []);
@@ -136,10 +136,10 @@ public class FlattenedHandlerRegistryGenerator : FluentGenerator
                         public static IServiceCollection AddAllHandlers(this IServiceCollection services)
                         {
                             // {{commands.Count}} Command Handlers
-                            {{string.Join("\n            ", commands.Select(c => $"services.AddScoped<{c.Data.Interface.GlobalName()}, {c.Data.Handler.GlobalName()}>();"))}}
+                            {{string.Join("\n            ", commands.Select(c => $"services.AddScoped<{c.Interface.GlobalName()}, {c.Handler.GlobalName()}>();"))}}
 
                             // {{queries.Count}} Query Handlers
-                            {{string.Join("\n            ", queries.Select(q => $"services.AddScoped<{q.Data.Interface.GlobalName()}, {q.Data.Handler.GlobalName()}>();"))}}
+                            {{string.Join("\n            ", queries.Select(q => $"services.AddScoped<{q.Interface.GlobalName()}, {q.Handler.GlobalName()}>();"))}}
 
                             return services;
                         }
