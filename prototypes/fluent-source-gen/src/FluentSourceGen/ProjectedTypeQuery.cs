@@ -89,7 +89,35 @@ public sealed class ProjectedTypeQuery<T>
                 {
                     var source = generator(item.Value, item.Symbol);
                     if (source is null) return;
-                    ctx.AddSource(spc, ctx.GetHintName(item.Symbol, suffix), source);
+                    ctx.AddSource(spc, ctx.GetHintName(item.Symbol, suffix), source, item.Symbol);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, item.Symbol.Name, ex, item.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Generate source code for each projected item with access to the diagnostic logger.
+    /// </summary>
+    public void Generate(Func<T, INamedTypeSymbol, ScopedLogger, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, item) =>
+            {
+                if (item.Value is null || item.Symbol is null) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var source = generator(item.Value, item.Symbol, log);
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(item.Symbol, suffix), source, item.Symbol);
                 }
                 catch (Exception ex)
                 {
@@ -128,6 +156,35 @@ public sealed class ProjectedTypeQuery<T>
     }
 
     /// <summary>
+    /// Generate source code from all projected items collected together with access to the diagnostic logger.
+    /// </summary>
+    public void GenerateAll(Func<IReadOnlyList<T>, ScopedLogger, (string HintName, string Source)?> generator)
+    {
+        var provider = BuildCollected();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, items) =>
+            {
+                var values = items.Where(i => i.Value is not null).Select(i => i.Value!).ToList();
+                if (values.Count == 0) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var result = generator(values, log);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
+    }
+
+    /// <summary>
     /// Generate source code from all projected items with their source symbols.
     /// </summary>
     public void GenerateAll(Func<IReadOnlyList<(T Value, INamedTypeSymbol Symbol)>, (string HintName, string Source)?> generator)
@@ -147,6 +204,38 @@ public sealed class ProjectedTypeQuery<T>
                 try
                 {
                     var result = generator(pairs);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Generate source code from all projected items with their source symbols and access to the diagnostic logger.
+    /// </summary>
+    public void GenerateAll(Func<IReadOnlyList<(T Value, INamedTypeSymbol Symbol)>, ScopedLogger, (string HintName, string Source)?> generator)
+    {
+        var provider = BuildCollected();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, items) =>
+            {
+                var pairs = items
+                    .Where(i => i.Value is not null && i.Symbol is not null)
+                    .Select(i => (i.Value!, i.Symbol!))
+                    .ToList();
+                if (pairs.Count == 0) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var result = generator(pairs, log);
                     if (result is null) return;
                     ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
                 }
@@ -246,6 +335,34 @@ public sealed class FlattenedTypeQuery<T>
         });
     }
 
+    /// <summary>
+    /// Generate source code from all flattened items collected together with access to the diagnostic logger.
+    /// </summary>
+    public void GenerateAll(Func<IReadOnlyList<FlattenedItem<T>>, ScopedLogger, (string HintName, string Source)?> generator)
+    {
+        var provider = BuildCollected();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, items) =>
+            {
+                if (items.Count == 0) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var result = generator(items.ToList(), log);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
+    }
+
     #endregion
 
     #region Build Methods
@@ -311,6 +428,36 @@ public sealed class ProjectedGroupedQuery<TKey, T> where TKey : notnull
                     try
                     {
                         var result = generator(group.Key, group.Values);
+                        if (result is null) continue;
+                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                    }
+                    catch (Exception ex)
+                    {
+                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
+                    }
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Generate source code for each projected group with access to the diagnostic logger.
+    /// </summary>
+    public void Generate(Func<TKey, IReadOnlyList<T>, ScopedLogger, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
+            {
+                var log = ctx.Log.For(spc);
+                foreach (var group in groupedResult.GetGroups())
+                {
+                    try
+                    {
+                        var result = generator(group.Key, group.Values, log);
                         if (result is null) continue;
                         ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
                     }

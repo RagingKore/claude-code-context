@@ -88,6 +88,36 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     }
 
     /// <summary>
+    /// Generate source code for each group of types with access to the diagnostic logger.
+    /// </summary>
+    public void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, ScopedLogger, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
+            {
+                var log = ctx.Log.For(spc);
+                foreach (var group in groupedResult.GetGroups())
+                {
+                    try
+                    {
+                        var result = generator(group.Key, group.Types, log);
+                        if (result is null) continue;
+                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                    }
+                    catch (Exception ex)
+                    {
+                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
+                    }
+                }
+            });
+        });
+    }
+
+    /// <summary>
     /// Generate source code for each group with attribute data.
     /// </summary>
     public void Generate(Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
@@ -104,6 +134,36 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
                     try
                     {
                         var result = generator(group.Key, group.TypesWithAttributes);
+                        if (result is null) continue;
+                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                    }
+                    catch (Exception ex)
+                    {
+                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
+                    }
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Generate source code for each group with attribute data and access to the diagnostic logger.
+    /// </summary>
+    public void Generate(Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, ScopedLogger, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
+            {
+                var log = ctx.Log.For(spc);
+                foreach (var group in groupedResult.GetGroups())
+                {
+                    try
+                    {
+                        var result = generator(group.Key, group.TypesWithAttributes, log);
                         if (result is null) continue;
                         ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
                     }

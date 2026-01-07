@@ -5,7 +5,7 @@ using Microsoft.CodeAnalysis.Text;
 namespace FluentSourceGen;
 
 /// <summary>
-/// Provides methods for emitting generated source code and diagnostics.
+/// Provides methods for emitting generated source code.
 /// </summary>
 public sealed class SourceEmitter
 {
@@ -57,50 +57,5 @@ public sealed class SourceEmitter
         }
 
         return source;
-    }
-
-    /// <summary>
-    /// Reports an informational diagnostic.
-    /// </summary>
-    public void ReportInfo(string id, string title, string message)
-    {
-        var descriptor = new DiagnosticDescriptor(
-            id, title, message, "FluentSourceGen",
-            DiagnosticSeverity.Info, isEnabledByDefault: true);
-        _context.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
-    }
-
-    /// <summary>
-    /// Reports a warning diagnostic.
-    /// </summary>
-    public void ReportWarning(string id, string title, string message)
-    {
-        var descriptor = new DiagnosticDescriptor(
-            id, title, message, "FluentSourceGen",
-            DiagnosticSeverity.Warning, isEnabledByDefault: true);
-        _context.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
-    }
-
-    /// <summary>
-    /// Reports an error diagnostic.
-    /// </summary>
-    public void ReportError(string id, string title, string message)
-    {
-        var descriptor = new DiagnosticDescriptor(
-            id, title, message, "FluentSourceGen",
-            DiagnosticSeverity.Error, isEnabledByDefault: true);
-        _context.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
-    }
-
-    /// <summary>
-    /// Reports a diagnostic with the type's location.
-    /// </summary>
-    public void ReportDiagnostic(DiagnosticSeverity severity, string id, string title, string message)
-    {
-        var location = _typeSymbol.Locations.FirstOrDefault() ?? Location.None;
-        var descriptor = new DiagnosticDescriptor(
-            id, title, message, "FluentSourceGen",
-            severity, isEnabledByDefault: true);
-        _context.ReportDiagnostic(Diagnostic.Create(descriptor, location));
     }
 }

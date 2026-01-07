@@ -35,22 +35,33 @@ public class ImplicitOperatorsGenerator : FluentGenerator
         UseFoldersForNamespace = true
     };
 
+    protected override DiagnosticOptions DiagnosticOptions => new()
+    {
+        IdPrefix = "IOP",
+        Verbosity = DiagnosticVerbosity.Verbose
+    };
+
     protected override void Configure(GeneratorContext ctx)
     {
         ctx.Types
             .ThatAreRecords()
             .ThatArePartial()
             .Implementing("Kurrent.IResultBase<>")
-            .Generate((type, iface) =>
+            .Generate((type, iface, log) =>
             {
                 if (iface.TypeArgumentCount < 2)
                 {
-                    // TODO: Report diagnostic - for now, skip generation
+                    log.Error(type.Locations.FirstOrDefault(), 2,
+                        "Interface on {TypeName} requires 2 type arguments, got {Count}",
+                        type.Name, iface.TypeArgumentCount);
                     return null;
                 }
 
                 var valueType = iface.TypeArgument(0);
                 var errorType = iface.TypeArgument(1);
+
+                log.Info(3, "Generating implicit operators for {TypeName} with value type {ValueType} and error type {ErrorType}",
+                    type.Name, valueType.Name, errorType.Name);
 
                 return $$"""
                     {{type.GetNamespaceDeclaration()}}

@@ -6,7 +6,7 @@ namespace FluentSourceGen;
 
 /// <summary>
 /// Provides methods for emitting generated source code when processing multiple types together.
-/// Used with <see cref="TypeQuery.ForAll"/> for generating registries, factories, or aggregate files.
+/// Used with <see cref="TypeQuery.GenerateAll"/> for generating registries, factories, or aggregate files.
 /// </summary>
 public sealed class CollectionEmitter
 {
@@ -16,8 +16,6 @@ public sealed class CollectionEmitter
     {
         _context = context;
     }
-
-    #region Source Emission
 
     /// <summary>
     /// Emits source code with the specified hint name.
@@ -29,47 +27,6 @@ public sealed class CollectionEmitter
         var normalizedSource = NormalizeSource(source);
         _context.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
     }
-
-    #endregion
-
-    #region Diagnostics
-
-    /// <summary>
-    /// Reports an informational diagnostic.
-    /// </summary>
-    public void ReportInfo(string id, string title, string message)
-    {
-        var descriptor = new DiagnosticDescriptor(
-            id, title, message, "FluentSourceGen",
-            DiagnosticSeverity.Info, isEnabledByDefault: true);
-        _context.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
-    }
-
-    /// <summary>
-    /// Reports a warning diagnostic.
-    /// </summary>
-    public void ReportWarning(string id, string title, string message)
-    {
-        var descriptor = new DiagnosticDescriptor(
-            id, title, message, "FluentSourceGen",
-            DiagnosticSeverity.Warning, isEnabledByDefault: true);
-        _context.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
-    }
-
-    /// <summary>
-    /// Reports an error diagnostic.
-    /// </summary>
-    public void ReportError(string id, string title, string message)
-    {
-        var descriptor = new DiagnosticDescriptor(
-            id, title, message, "FluentSourceGen",
-            DiagnosticSeverity.Error, isEnabledByDefault: true);
-        _context.ReportDiagnostic(Diagnostic.Create(descriptor, Location.None));
-    }
-
-    #endregion
-
-    #region Helpers
 
     static string NormalizeSource(string source)
     {
@@ -89,6 +46,4 @@ public sealed class CollectionEmitter
 
         return source;
     }
-
-    #endregion
 }

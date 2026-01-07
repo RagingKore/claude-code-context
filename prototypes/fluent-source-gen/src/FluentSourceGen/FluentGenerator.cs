@@ -17,17 +17,24 @@ public abstract class FluentGenerator : IIncrementalGenerator
     protected virtual FileNamingOptions FileNaming => FileNamingOptions.Default;
 
     /// <summary>
-    /// Gets the diagnostic ID prefix for this generator (e.g., "FSG").
-    /// Override to use a custom prefix for your generator's diagnostics.
+    /// Gets the diagnostic options for this generator.
+    /// Override to customize diagnostic ID prefix, category, and verbosity.
     /// </summary>
-    protected virtual string DiagnosticIdPrefix => "FSG";
+    protected virtual DiagnosticOptions DiagnosticOptions => DiagnosticOptions.Default;
+
+    /// <summary>
+    /// Gets the diagnostic logger for this generator.
+    /// Use <see cref="DiagnosticLogger.For"/> to create scoped loggers in callbacks.
+    /// </summary>
+    protected DiagnosticLogger Log { get; private set; } = null!;
 
     /// <summary>
     /// Called by Roslyn to initialize the generator.
     /// </summary>
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var generatorContext = new GeneratorContext(context, FileNaming, DiagnosticIdPrefix);
+        Log = new DiagnosticLogger(DiagnosticOptions);
+        var generatorContext = new GeneratorContext(context, FileNaming, Log);
         Configure(generatorContext);
         generatorContext.ExecuteAllRegistrations();
     }
@@ -51,11 +58,11 @@ public sealed class GeneratorContext
     internal GeneratorContext(
         IncrementalGeneratorInitializationContext context,
         FileNamingOptions fileNaming,
-        string diagnosticIdPrefix)
+        DiagnosticLogger log)
     {
         _context = context;
         FileNaming = fileNaming;
-        Diagnostics = new DiagnosticReporter(diagnosticIdPrefix);
+        Log = log;
     }
 
     /// <summary>
@@ -69,9 +76,9 @@ public sealed class GeneratorContext
     public FileNamingOptions FileNaming { get; }
 
     /// <summary>
-    /// Gets the diagnostic reporter for reporting errors, warnings, and info.
+    /// Gets the diagnostic logger for reporting errors, warnings, and info.
     /// </summary>
-    public DiagnosticReporter Diagnostics { get; }
+    public DiagnosticLogger Log { get; }
 
     /// <summary>
     /// Starts a fluent query to find and process types.
@@ -110,12 +117,16 @@ public sealed class GeneratorContext
     }
 
     /// <summary>
-    /// Adds source with standard normalization (auto-generated header).
+    /// Adds source with standard normalization (auto-generated header) and optional auto-logging.
     /// </summary>
-    internal void AddSource(SourceProductionContext spc, string hintName, string source)
+    internal void AddSource(SourceProductionContext spc, string hintName, string source, INamedTypeSymbol? forType = null)
     {
         var normalizedSource = NormalizeSource(source);
         spc.AddSource(hintName, SourceText.From(normalizedSource, Encoding.UTF8));
+
+        // Auto-log file generation when verbose
+        var log = Log.For(spc);
+        log.Info(forType?.Locations.FirstOrDefault(), 0, "Generated {FileName} for {TypeName}", hintName, forType?.Name ?? "aggregate");
     }
 
     /// <summary>
@@ -130,15 +141,12 @@ public sealed class GeneratorContext
     }
 
     /// <summary>
-    /// Reports an exception as a diagnostic.
+    /// Reports an exception as an error diagnostic.
     /// </summary>
     internal void ReportException(SourceProductionContext spc, string context, Exception ex, Location? location = null)
     {
-        spc.ReportDiagnostic(Diagnostic.Create(
-            Diagnostics.UnhandledException,
-            location ?? Location.None,
-            context,
-            ex.Message));
+        var log = Log.For(spc);
+        log.Error(location, 1, "Generation failed for {Context}: {Message}", context, ex.Message);
     }
 
     static string NormalizeSource(string source)
@@ -158,49 +166,4 @@ public sealed class GeneratorContext
 
         return source;
     }
-}
-
-/// <summary>
-/// Provides methods for reporting diagnostics during source generation.
-/// </summary>
-public sealed class DiagnosticReporter
-{
-    readonly string _idPrefix;
-
-    internal DiagnosticReporter(string idPrefix)
-    {
-        _idPrefix = idPrefix;
-    }
-
-    /// <summary>
-    /// Creates an error diagnostic descriptor.
-    /// </summary>
-    public DiagnosticDescriptor Error(string id, string title, string messageFormat) =>
-        new($"{_idPrefix}{id}", title, messageFormat, "FluentSourceGen",
-            DiagnosticSeverity.Error, isEnabledByDefault: true);
-
-    /// <summary>
-    /// Creates a warning diagnostic descriptor.
-    /// </summary>
-    public DiagnosticDescriptor Warning(string id, string title, string messageFormat) =>
-        new($"{_idPrefix}{id}", title, messageFormat, "FluentSourceGen",
-            DiagnosticSeverity.Warning, isEnabledByDefault: true);
-
-    /// <summary>
-    /// Creates an info diagnostic descriptor.
-    /// </summary>
-    public DiagnosticDescriptor Info(string id, string title, string messageFormat) =>
-        new($"{_idPrefix}{id}", title, messageFormat, "FluentSourceGen",
-            DiagnosticSeverity.Info, isEnabledByDefault: true);
-
-    /// <summary>
-    /// Diagnostic for unhandled exceptions during generation.
-    /// </summary>
-    internal DiagnosticDescriptor UnhandledException { get; } = new(
-        "FSG0001",
-        "Source generation failed",
-        "An error occurred while generating source for '{0}': {1}",
-        "FluentSourceGen",
-        DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
 }

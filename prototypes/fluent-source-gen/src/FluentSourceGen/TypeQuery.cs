@@ -1217,7 +1217,35 @@ public sealed class TypeQuery
                 {
                     var source = generator(result.Symbol);
                     if (source is null) return;
-                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source);
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source, result.Symbol);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, result.Symbol.Name, ex, result.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Generate source code for each matching type with access to the diagnostic logger.
+    /// </summary>
+    public void Generate(Func<INamedTypeSymbol, ScopedLogger, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, result) =>
+            {
+                if (result.Symbol is null) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var source = generator(result.Symbol, log);
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source, result.Symbol);
                 }
                 catch (Exception ex)
                 {
@@ -1244,7 +1272,35 @@ public sealed class TypeQuery
                 {
                     var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]));
                     if (source is null) return;
-                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source);
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source, result.Symbol);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, result.Symbol.Name, ex, result.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Generate source code for each matching type with attribute data and access to the diagnostic logger.
+    /// </summary>
+    public void Generate(Func<INamedTypeSymbol, AttributeMatch, ScopedLogger, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, result) =>
+            {
+                if (result.Symbol is null || result.Attributes.Count == 0) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]), log);
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source, result.Symbol);
                 }
                 catch (Exception ex)
                 {
@@ -1271,7 +1327,35 @@ public sealed class TypeQuery
                 {
                     var source = generator(result.Symbol, new InterfaceMatch(result.Interfaces[0]));
                     if (source is null) return;
-                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source);
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source, result.Symbol);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, result.Symbol.Name, ex, result.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Generate source code for each matching type with interface data and access to the diagnostic logger.
+    /// </summary>
+    public void Generate(Func<INamedTypeSymbol, InterfaceMatch, ScopedLogger, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, result) =>
+            {
+                if (result.Symbol is null || result.Interfaces.Count == 0) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var source = generator(result.Symbol, new InterfaceMatch(result.Interfaces[0]), log);
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source, result.Symbol);
                 }
                 catch (Exception ex)
                 {
@@ -1298,7 +1382,35 @@ public sealed class TypeQuery
                 {
                     var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]), new InterfaceMatch(result.Interfaces[0]));
                     if (source is null) return;
-                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source);
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source, result.Symbol);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, result.Symbol.Name, ex, result.Symbol.Locations.FirstOrDefault());
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Generate source code for each matching type with both attribute and interface data and access to the diagnostic logger.
+    /// </summary>
+    public void Generate(Func<INamedTypeSymbol, AttributeMatch, InterfaceMatch, ScopedLogger, string?> generator, string? suffix = null)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, result) =>
+            {
+                if (result.Symbol is null || result.Attributes.Count == 0 || result.Interfaces.Count == 0) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var source = generator(result.Symbol, new AttributeMatch(result.Attributes[0]), new InterfaceMatch(result.Interfaces[0]), log);
+                    if (source is null) return;
+                    ctx.AddSource(spc, ctx.GetHintName(result.Symbol, suffix), source, result.Symbol);
                 }
                 catch (Exception ex)
                 {
@@ -1337,6 +1449,35 @@ public sealed class TypeQuery
     }
 
     /// <summary>
+    /// Collect all matching types and generate a single source file with access to the diagnostic logger.
+    /// </summary>
+    public void GenerateAll(Func<IReadOnlyList<INamedTypeSymbol>, ScopedLogger, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider.Collect(), (spc, results) =>
+            {
+                var symbols = results.Where(r => r.Symbol is not null).Select(r => r.Symbol!).ToList();
+                if (symbols.Count == 0) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var result = generator(symbols, log);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
+    }
+
+    /// <summary>
     /// Collect all matching types with attribute data and generate a single source file.
     /// </summary>
     public void GenerateAll(Func<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
@@ -1356,6 +1497,38 @@ public sealed class TypeQuery
                 try
                 {
                     var result = generator(items);
+                    if (result is null) return;
+                    ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
+                }
+                catch (Exception ex)
+                {
+                    ctx.ReportException(spc, "collection", ex);
+                }
+            });
+        });
+    }
+
+    /// <summary>
+    /// Collect all matching types with attribute data and generate a single source file with access to the diagnostic logger.
+    /// </summary>
+    public void GenerateAll(Func<IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, ScopedLogger, (string HintName, string Source)?> generator)
+    {
+        var provider = Build();
+        var ctx = _context;
+
+        _context.EnqueueRegistration(() =>
+        {
+            ctx.RoslynContext.RegisterSourceOutput(provider.Collect(), (spc, results) =>
+            {
+                var items = results
+                    .Where(r => r.Symbol is not null && r.Attributes.Count > 0)
+                    .Select(r => (r.Symbol!, new AttributeMatch(r.Attributes[0])))
+                    .ToList();
+                if (items.Count == 0) return;
+                var log = ctx.Log.For(spc);
+                try
+                {
+                    var result = generator(items, log);
                     if (result is null) return;
                     ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
                 }
