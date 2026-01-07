@@ -110,7 +110,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
         {
             var symbols = results
                 .Where(r => r.Symbol is not null)
-                .Select(r => (Symbol: r.Symbol!, r.Attributes, r.Interfaces))
+                .Select(r => r.Symbol!)
                 .ToList();
 
             return new GroupedQueryResult<TKey>(symbols, keySelector, comparer, groupPredicate, orderAscending);
@@ -125,14 +125,14 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
 /// </summary>
 public readonly struct GroupedQueryResult<TKey> where TKey : notnull
 {
-    readonly IReadOnlyList<(INamedTypeSymbol Symbol, List<AttributeData> Attributes, List<INamedTypeSymbol> Interfaces)> _symbols;
+    readonly IReadOnlyList<INamedTypeSymbol> _symbols;
     readonly Func<INamedTypeSymbol, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
     readonly Func<TKey, bool>? _groupPredicate;
     readonly bool? _orderAscending;
 
     internal GroupedQueryResult(
-        IReadOnlyList<(INamedTypeSymbol Symbol, List<AttributeData> Attributes, List<INamedTypeSymbol> Interfaces)> symbols,
+        IReadOnlyList<INamedTypeSymbol> symbols,
         Func<INamedTypeSymbol, TKey> keySelector,
         IEqualityComparer<TKey> comparer,
         Func<TKey, bool>? groupPredicate,
@@ -153,9 +153,9 @@ public readonly struct GroupedQueryResult<TKey> where TKey : notnull
         if (_symbols.Count == 0)
             yield break;
 
-        var rawGroups = _symbols.GroupBy(x => _keySelector(x.Symbol), _comparer);
+        var rawGroups = _symbols.GroupBy(_keySelector, _comparer);
 
-        IEnumerable<IGrouping<TKey, (INamedTypeSymbol Symbol, List<AttributeData> Attributes, List<INamedTypeSymbol> Interfaces)>> groups = rawGroups;
+        IEnumerable<IGrouping<TKey, INamedTypeSymbol>> groups = rawGroups;
 
         if (_groupPredicate is not null)
             groups = groups.Where(g => _groupPredicate(g.Key));
@@ -185,7 +185,7 @@ public readonly struct TypeGroup<TKey>
     public TKey Key { get; }
 
     /// <summary>
-    /// The items in this group with full attribute/interface data.
+    /// The items in this group.
     /// </summary>
     public IReadOnlyList<GenerationItem> Items { get; }
 
@@ -194,11 +194,9 @@ public readonly struct TypeGroup<TKey>
     /// </summary>
     public IEnumerable<INamedTypeSymbol> Types => Items.Select(i => i.Type);
 
-    internal TypeGroup(
-        TKey key,
-        IReadOnlyList<(INamedTypeSymbol Symbol, List<AttributeData> Attributes, List<INamedTypeSymbol> Interfaces)> items)
+    internal TypeGroup(TKey key, IReadOnlyList<INamedTypeSymbol> symbols)
     {
         Key = key;
-        Items = items.Select(x => new GenerationItem(x.Symbol, x.Attributes, x.Interfaces)).ToList();
+        Items = symbols.Select(s => new GenerationItem(s)).ToList();
     }
 }

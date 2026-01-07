@@ -3,24 +3,15 @@ using Microsoft.CodeAnalysis;
 namespace FluentSourceGen;
 
 /// <summary>
-/// Context provided to Generate callbacks containing all matched data and utilities.
+/// Context provided to Generate callbacks containing the type and logger.
+/// Use extension methods on Type to access attribute/interface data.
 /// </summary>
 public sealed class GenerationContext
 {
-    internal GenerationContext(
-        INamedTypeSymbol type,
-        ScopedLogger log,
-        IReadOnlyList<AttributeData> attributes,
-        IReadOnlyList<INamedTypeSymbol> interfaces)
+    internal GenerationContext(INamedTypeSymbol type, ScopedLogger log)
     {
         Type = type;
         Log = log;
-
-        // Build unified matches list
-        var matches = new List<Match>();
-        matches.AddRange(attributes.Select(a => new AttributeMatch(a)));
-        matches.AddRange(interfaces.Select(i => new InterfaceMatch(i)));
-        Matches = matches;
     }
 
     /// <summary>
@@ -34,26 +25,6 @@ public sealed class GenerationContext
     public ScopedLogger Log { get; }
 
     /// <summary>
-    /// All matches (attributes and interfaces combined).
-    /// </summary>
-    public IReadOnlyList<Match> Matches { get; }
-
-    /// <summary>
-    /// The first match, or null if none.
-    /// </summary>
-    public Match? Match => Matches.Count > 0 ? Matches[0] : null;
-
-    /// <summary>
-    /// The first matched attribute, or null if none.
-    /// </summary>
-    public AttributeMatch? Attribute => Matches.OfType<AttributeMatch>().FirstOrDefault();
-
-    /// <summary>
-    /// The first matched interface, or null if none.
-    /// </summary>
-    public InterfaceMatch? Interface => Matches.OfType<InterfaceMatch>().FirstOrDefault();
-
-    /// <summary>
     /// Gets the type's first source location, useful for diagnostics.
     /// </summary>
     public Location? Location => Type.Locations.FirstOrDefault();
@@ -64,49 +35,21 @@ public sealed class GenerationContext
 /// </summary>
 public sealed class GenerationItem
 {
-    internal GenerationItem(
-        INamedTypeSymbol type,
-        IReadOnlyList<AttributeData> attributes,
-        IReadOnlyList<INamedTypeSymbol> interfaces)
+    internal GenerationItem(INamedTypeSymbol type)
     {
         Type = type;
-
-        var matches = new List<Match>();
-        matches.AddRange(attributes.Select(a => new AttributeMatch(a)));
-        matches.AddRange(interfaces.Select(i => new InterfaceMatch(i)));
-        Matches = matches;
     }
 
     /// <summary>
     /// The type being processed.
     /// </summary>
     public INamedTypeSymbol Type { get; }
-
-    /// <summary>
-    /// All matches (attributes and interfaces combined).
-    /// </summary>
-    public IReadOnlyList<Match> Matches { get; }
-
-    /// <summary>
-    /// The first match, or null if none.
-    /// </summary>
-    public Match? Match => Matches.Count > 0 ? Matches[0] : null;
-
-    /// <summary>
-    /// The first matched attribute, or null if none.
-    /// </summary>
-    public AttributeMatch? Attribute => Matches.OfType<AttributeMatch>().FirstOrDefault();
-
-    /// <summary>
-    /// The first matched interface, or null if none.
-    /// </summary>
-    public InterfaceMatch? Interface => Matches.OfType<InterfaceMatch>().FirstOrDefault();
 }
 
 /// <summary>
 /// Context provided to GenerateAll and grouped Generate callbacks.
 /// </summary>
-/// <typeparam name="TKey">The type of the grouping key (use object for non-grouped).</typeparam>
+/// <typeparam name="TKey">The type of the grouping key.</typeparam>
 public sealed class BatchContext<TKey>
 {
     internal BatchContext(TKey? key, IReadOnlyList<GenerationItem> items, ScopedLogger log)
@@ -117,7 +60,7 @@ public sealed class BatchContext<TKey>
     }
 
     /// <summary>
-    /// The grouping key (null for non-grouped batches).
+    /// The grouping key.
     /// </summary>
     public TKey? Key { get; }
 
@@ -143,7 +86,7 @@ public sealed class BatchContext<TKey>
 }
 
 /// <summary>
-/// Non-generic batch context alias for GenerateAll.
+/// Non-generic batch context for GenerateAll.
 /// </summary>
 public sealed class BatchContext
 {

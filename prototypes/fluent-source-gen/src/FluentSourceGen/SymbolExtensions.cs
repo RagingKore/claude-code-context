@@ -248,10 +248,131 @@ public static class SymbolExtensions
     }
 
     /// <summary>
+    /// Finds all attributes matching the name pattern.
+    /// </summary>
+    public static IEnumerable<AttributeData> FindAttributes(this INamedTypeSymbol symbol, string attributePattern)
+    {
+        foreach (var attr in symbol.GetAttributes())
+        {
+            if (attr.AttributeClass is not { } attrClass)
+                continue;
+
+            var attrName = attrClass.OriginalDefinition.ToDisplayString();
+
+            if (MatchesTypeName(attrName, attributePattern))
+                yield return attr;
+        }
+    }
+
+    /// <summary>
     /// Checks if the type has an attribute matching the pattern.
     /// </summary>
     public static bool HasAttribute(this INamedTypeSymbol symbol, string attributePattern) =>
         symbol.FindAttribute(attributePattern) is not null;
+
+    /// <summary>
+    /// Gets a constructor argument from an attribute by index.
+    /// </summary>
+    public static T? GetAttributeArg<T>(this INamedTypeSymbol symbol, string attributePattern, int index)
+    {
+        var attr = symbol.FindAttribute(attributePattern);
+        if (attr is null) return default;
+
+        if (index < 0 || index >= attr.ConstructorArguments.Length)
+            return default;
+
+        var arg = attr.ConstructorArguments[index];
+        return arg.Value is T value ? value : default;
+    }
+
+    /// <summary>
+    /// Gets a named argument from an attribute.
+    /// </summary>
+    public static T? GetAttributeNamedArg<T>(this INamedTypeSymbol symbol, string attributePattern, string argName)
+    {
+        var attr = symbol.FindAttribute(attributePattern);
+        if (attr is null) return default;
+
+        foreach (var namedArg in attr.NamedArguments)
+        {
+            if (namedArg.Key == argName && namedArg.Value.Value is T value)
+                return value;
+        }
+
+        return default;
+    }
+
+    /// <summary>
+    /// Gets a type argument from an attribute's generic parameter by index.
+    /// </summary>
+    public static ITypeSymbol? GetAttributeTypeArg(this INamedTypeSymbol symbol, string attributePattern, int index)
+    {
+        var attr = symbol.FindAttribute(attributePattern);
+        if (attr?.AttributeClass is not { IsGenericType: true } attrClass)
+            return null;
+
+        if (index < 0 || index >= attrClass.TypeArguments.Length)
+            return null;
+
+        return attrClass.TypeArguments[index];
+    }
+
+    /// <summary>
+    /// Gets all type arguments from an attribute's generic parameters.
+    /// </summary>
+    public static IReadOnlyList<ITypeSymbol> GetAttributeTypeArgs(this INamedTypeSymbol symbol, string attributePattern)
+    {
+        var attr = symbol.FindAttribute(attributePattern);
+        if (attr?.AttributeClass is not { IsGenericType: true } attrClass)
+            return [];
+
+        return attrClass.TypeArguments;
+    }
+
+    #endregion
+
+    #region Interface Type Argument Extensions
+
+    /// <summary>
+    /// Finds all interfaces matching the name pattern.
+    /// </summary>
+    public static IEnumerable<INamedTypeSymbol> FindInterfaces(this INamedTypeSymbol symbol, string interfacePattern)
+    {
+        foreach (var iface in symbol.AllInterfaces)
+        {
+            var ifaceName = iface.OriginalDefinition.ToDisplayString();
+
+            if (MatchesTypeName(ifaceName, interfacePattern))
+                yield return iface;
+        }
+    }
+
+    /// <summary>
+    /// Gets a type argument from an interface by index.
+    /// </summary>
+    public static ITypeSymbol? GetInterfaceTypeArg(this INamedTypeSymbol symbol, string interfacePattern, int index)
+    {
+        var iface = symbol.FindInterface(interfacePattern);
+        if (iface is null || !iface.IsGenericType)
+            return null;
+
+        if (index < 0 || index >= iface.TypeArguments.Length)
+            return null;
+
+        return iface.TypeArguments[index];
+    }
+
+    /// <summary>
+    /// Gets all type arguments from an interface.
+    /// </summary>
+    public static IReadOnlyList<ITypeSymbol> GetInterfaceTypeArgs(this INamedTypeSymbol symbol, string interfacePattern)
+    {
+        var iface = symbol.FindInterface(interfacePattern);
+        if (iface is null || !iface.IsGenericType)
+            return [];
+
+        return iface.TypeArguments;
+    }
 
     #endregion
 

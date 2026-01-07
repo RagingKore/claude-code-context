@@ -1217,7 +1217,7 @@ public sealed class TypeQuery
             {
                 if (result.Symbol is null) return;
                 var log = ctx.Log.For(spc);
-                var genCtx = new GenerationContext(result.Symbol, log, result.Attributes, result.Interfaces);
+                var genCtx = new GenerationContext(result.Symbol, log);
                 try
                 {
                     var source = generator(genCtx);
@@ -1247,7 +1247,7 @@ public sealed class TypeQuery
             {
                 var items = results
                     .Where(r => r.Symbol is not null)
-                    .Select(r => new GenerationItem(r.Symbol!, r.Attributes, r.Interfaces))
+                    .Select(r => new GenerationItem(r.Symbol!))
                     .ToList();
                 if (items.Count == 0) return;
 
