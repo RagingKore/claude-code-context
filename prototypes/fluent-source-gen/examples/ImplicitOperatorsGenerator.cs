@@ -47,11 +47,14 @@ public class ImplicitOperatorsGenerator : FluentGenerator
             .ThatAreRecords()
             .ThatArePartial()
             .Implementing("Kurrent.IResultBase<>")
-            .Generate((type, iface, log) =>
+            .Generate(gen =>
             {
+                var type = gen.Type;
+                var iface = gen.Interface!;
+
                 if (iface.TypeArgumentCount < 2)
                 {
-                    log.Error(type.Locations.FirstOrDefault(), 2,
+                    gen.Log.Error(gen.Location, 2,
                         "Interface on {TypeName} requires 2 type arguments, got {Count}",
                         type.Name, iface.TypeArgumentCount);
                     return null;
@@ -60,7 +63,7 @@ public class ImplicitOperatorsGenerator : FluentGenerator
                 var valueType = iface.TypeArgument(0);
                 var errorType = iface.TypeArgument(1);
 
-                log.Info(3, "Generating implicit operators for {TypeName} with value type {ValueType} and error type {ErrorType}",
+                gen.Log.Info(3, "Generating implicit operators for {TypeName} with value type {ValueType} and error type {ErrorType}",
                     type.Name, valueType.Name, errorType.Name);
 
                 return $$"""

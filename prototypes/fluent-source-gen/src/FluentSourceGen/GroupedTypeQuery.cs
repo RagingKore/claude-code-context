@@ -59,38 +59,11 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     #region Generate Methods (Terminal Operations)
 
     /// <summary>
-    /// Generate source code for each group of types.
+    /// Generate source code for each group using a context that provides access to
+    /// the group key, items, and diagnostic logger.
     /// </summary>
-    public void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, (string HintName, string Source)?> generator)
-    {
-        var provider = Build();
-        var ctx = _context;
-
-        _context.EnqueueRegistration(() =>
-        {
-            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
-            {
-                foreach (var group in groupedResult.GetGroups())
-                {
-                    try
-                    {
-                        var result = generator(group.Key, group.Types);
-                        if (result is null) continue;
-                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
-                    }
-                    catch (Exception ex)
-                    {
-                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
-                    }
-                }
-            });
-        });
-    }
-
-    /// <summary>
-    /// Generate source code for each group of types with access to the diagnostic logger.
-    /// </summary>
-    public void Generate(Func<TKey, IReadOnlyList<INamedTypeSymbol>, ScopedLogger, (string HintName, string Source)?> generator)
+    /// <param name="generator">Function that receives a GroupGenerationContext and returns hint name and source (or null to skip).</param>
+    public void Generate(Func<GroupGenerationContext<TKey>, (string HintName, string Source)?> generator)
     {
         var provider = Build();
         var ctx = _context;
@@ -102,68 +75,10 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
                 var log = ctx.Log.For(spc);
                 foreach (var group in groupedResult.GetGroups())
                 {
+                    var genCtx = new GroupGenerationContext<TKey>(group.Key, group.Items, log);
                     try
                     {
-                        var result = generator(group.Key, group.Types, log);
-                        if (result is null) continue;
-                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
-                    }
-                    catch (Exception ex)
-                    {
-                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
-                    }
-                }
-            });
-        });
-    }
-
-    /// <summary>
-    /// Generate source code for each group with attribute data.
-    /// </summary>
-    public void Generate(Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, (string HintName, string Source)?> generator)
-    {
-        var provider = Build();
-        var ctx = _context;
-
-        _context.EnqueueRegistration(() =>
-        {
-            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
-            {
-                foreach (var group in groupedResult.GetGroups())
-                {
-                    try
-                    {
-                        var result = generator(group.Key, group.TypesWithAttributes);
-                        if (result is null) continue;
-                        ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
-                    }
-                    catch (Exception ex)
-                    {
-                        ctx.ReportException(spc, $"group '{group.Key}'", ex);
-                    }
-                }
-            });
-        });
-    }
-
-    /// <summary>
-    /// Generate source code for each group with attribute data and access to the diagnostic logger.
-    /// </summary>
-    public void Generate(Func<TKey, IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)>, ScopedLogger, (string HintName, string Source)?> generator)
-    {
-        var provider = Build();
-        var ctx = _context;
-
-        _context.EnqueueRegistration(() =>
-        {
-            ctx.RoslynContext.RegisterSourceOutput(provider, (spc, groupedResult) =>
-            {
-                var log = ctx.Log.For(spc);
-                foreach (var group in groupedResult.GetGroups())
-                {
-                    try
-                    {
-                        var result = generator(group.Key, group.TypesWithAttributes, log);
+                        var result = generator(genCtx);
                         if (result is null) continue;
                         ctx.AddSource(spc, result.Value.HintName, result.Value.Source);
                     }
@@ -270,33 +185,20 @@ public readonly struct TypeGroup<TKey>
     public TKey Key { get; }
 
     /// <summary>
-    /// The types in this group.
+    /// The items in this group with full attribute/interface data.
     /// </summary>
-    public IReadOnlyList<INamedTypeSymbol> Types { get; }
+    public IReadOnlyList<GenerationItem> Items { get; }
 
     /// <summary>
-    /// The types with their attribute data.
+    /// Convenience property to get just the type symbols.
     /// </summary>
-    public IReadOnlyList<(INamedTypeSymbol Symbol, AttributeMatch Attribute)> TypesWithAttributes { get; }
-
-    /// <summary>
-    /// The types with their interface data.
-    /// </summary>
-    public IReadOnlyList<(INamedTypeSymbol Symbol, InterfaceMatch Interface)> TypesWithInterfaces { get; }
+    public IEnumerable<INamedTypeSymbol> Types => Items.Select(i => i.Type);
 
     internal TypeGroup(
         TKey key,
         IReadOnlyList<(INamedTypeSymbol Symbol, List<AttributeData> Attributes, List<INamedTypeSymbol> Interfaces)> items)
     {
         Key = key;
-        Types = items.Select(x => x.Symbol).ToList();
-        TypesWithAttributes = items
-            .Where(x => x.Attributes.Count > 0)
-            .Select(x => (x.Symbol, new AttributeMatch(x.Attributes[0])))
-            .ToList();
-        TypesWithInterfaces = items
-            .Where(x => x.Interfaces.Count > 0)
-            .Select(x => (x.Symbol, new InterfaceMatch(x.Interfaces[0])))
-            .ToList();
+        Items = items.Select(x => new GenerationItem(x.Symbol, x.Attributes, x.Interfaces)).ToList();
     }
 }
