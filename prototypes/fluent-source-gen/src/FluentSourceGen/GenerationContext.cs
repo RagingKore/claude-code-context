@@ -15,8 +15,12 @@ public sealed class GenerationContext
     {
         Type = type;
         Log = log;
-        Attributes = attributes.Select(a => new AttributeMatch(a)).ToList();
-        Interfaces = interfaces.Select(i => new InterfaceMatch(i)).ToList();
+
+        // Build unified matches list
+        var matches = new List<Match>();
+        matches.AddRange(attributes.Select(a => new AttributeMatch(a)));
+        matches.AddRange(interfaces.Select(i => new InterfaceMatch(i)));
+        Matches = matches;
     }
 
     /// <summary>
@@ -30,34 +34,24 @@ public sealed class GenerationContext
     public ScopedLogger Log { get; }
 
     /// <summary>
-    /// All matched attributes (from WithAttribute filters).
+    /// All matches (attributes and interfaces combined).
     /// </summary>
-    public IReadOnlyList<AttributeMatch> Attributes { get; }
+    public IReadOnlyList<Match> Matches { get; }
 
     /// <summary>
-    /// All matched interfaces (from Implementing filters).
+    /// The first match, or null if none.
     /// </summary>
-    public IReadOnlyList<InterfaceMatch> Interfaces { get; }
+    public Match? Match => Matches.Count > 0 ? Matches[0] : null;
 
     /// <summary>
     /// The first matched attribute, or null if none.
     /// </summary>
-    public AttributeMatch? Attribute => Attributes.Count > 0 ? Attributes[0] : null;
+    public AttributeMatch? Attribute => Matches.OfType<AttributeMatch>().FirstOrDefault();
 
     /// <summary>
     /// The first matched interface, or null if none.
     /// </summary>
-    public InterfaceMatch? Interface => Interfaces.Count > 0 ? Interfaces[0] : null;
-
-    /// <summary>
-    /// Whether any attributes were matched.
-    /// </summary>
-    public bool HasAttribute => Attributes.Count > 0;
-
-    /// <summary>
-    /// Whether any interfaces were matched.
-    /// </summary>
-    public bool HasInterface => Interfaces.Count > 0;
+    public InterfaceMatch? Interface => Matches.OfType<InterfaceMatch>().FirstOrDefault();
 
     /// <summary>
     /// Gets the type's first source location, useful for diagnostics.
@@ -66,7 +60,7 @@ public sealed class GenerationContext
 }
 
 /// <summary>
-/// Represents a single item in a collection generation context.
+/// Represents a single item in a batch context.
 /// </summary>
 public sealed class GenerationItem
 {
@@ -76,8 +70,11 @@ public sealed class GenerationItem
         IReadOnlyList<INamedTypeSymbol> interfaces)
     {
         Type = type;
-        Attributes = attributes.Select(a => new AttributeMatch(a)).ToList();
-        Interfaces = interfaces.Select(i => new InterfaceMatch(i)).ToList();
+
+        var matches = new List<Match>();
+        matches.AddRange(attributes.Select(a => new AttributeMatch(a)));
+        matches.AddRange(interfaces.Select(i => new InterfaceMatch(i)));
+        Matches = matches;
     }
 
     /// <summary>
@@ -86,70 +83,33 @@ public sealed class GenerationItem
     public INamedTypeSymbol Type { get; }
 
     /// <summary>
-    /// All matched attributes.
+    /// All matches (attributes and interfaces combined).
     /// </summary>
-    public IReadOnlyList<AttributeMatch> Attributes { get; }
+    public IReadOnlyList<Match> Matches { get; }
 
     /// <summary>
-    /// All matched interfaces.
+    /// The first match, or null if none.
     /// </summary>
-    public IReadOnlyList<InterfaceMatch> Interfaces { get; }
+    public Match? Match => Matches.Count > 0 ? Matches[0] : null;
 
     /// <summary>
     /// The first matched attribute, or null if none.
     /// </summary>
-    public AttributeMatch? Attribute => Attributes.Count > 0 ? Attributes[0] : null;
+    public AttributeMatch? Attribute => Matches.OfType<AttributeMatch>().FirstOrDefault();
 
     /// <summary>
     /// The first matched interface, or null if none.
     /// </summary>
-    public InterfaceMatch? Interface => Interfaces.Count > 0 ? Interfaces[0] : null;
+    public InterfaceMatch? Interface => Matches.OfType<InterfaceMatch>().FirstOrDefault();
 }
 
 /// <summary>
-/// Context provided to GenerateAll callbacks for batch processing.
+/// Context provided to GenerateAll and grouped Generate callbacks.
 /// </summary>
-public sealed class CollectionGenerationContext
+/// <typeparam name="TKey">The type of the grouping key (use object for non-grouped).</typeparam>
+public sealed class BatchContext<TKey>
 {
-    internal CollectionGenerationContext(
-        IReadOnlyList<GenerationItem> items,
-        ScopedLogger log)
-    {
-        Items = items;
-        Log = log;
-    }
-
-    /// <summary>
-    /// All matched types with their attributes and interfaces.
-    /// </summary>
-    public IReadOnlyList<GenerationItem> Items { get; }
-
-    /// <summary>
-    /// The diagnostic logger for reporting errors, warnings, and info.
-    /// </summary>
-    public ScopedLogger Log { get; }
-
-    /// <summary>
-    /// Convenience property to get just the type symbols.
-    /// </summary>
-    public IEnumerable<INamedTypeSymbol> Types => Items.Select(i => i.Type);
-
-    /// <summary>
-    /// Number of items in the collection.
-    /// </summary>
-    public int Count => Items.Count;
-}
-
-/// <summary>
-/// Context provided to grouped Generate callbacks.
-/// </summary>
-/// <typeparam name="TKey">The type of the grouping key.</typeparam>
-public sealed class GroupGenerationContext<TKey>
-{
-    internal GroupGenerationContext(
-        TKey key,
-        IReadOnlyList<GenerationItem> items,
-        ScopedLogger log)
+    internal BatchContext(TKey? key, IReadOnlyList<GenerationItem> items, ScopedLogger log)
     {
         Key = key;
         Items = items;
@@ -157,17 +117,17 @@ public sealed class GroupGenerationContext<TKey>
     }
 
     /// <summary>
-    /// The grouping key.
+    /// The grouping key (null for non-grouped batches).
     /// </summary>
-    public TKey Key { get; }
+    public TKey? Key { get; }
 
     /// <summary>
-    /// All types in this group with their attributes and interfaces.
+    /// All items in this batch/group.
     /// </summary>
     public IReadOnlyList<GenerationItem> Items { get; }
 
     /// <summary>
-    /// The diagnostic logger for reporting errors, warnings, and info.
+    /// The diagnostic logger.
     /// </summary>
     public ScopedLogger Log { get; }
 
@@ -177,21 +137,53 @@ public sealed class GroupGenerationContext<TKey>
     public IEnumerable<INamedTypeSymbol> Types => Items.Select(i => i.Type);
 
     /// <summary>
-    /// Number of items in the group.
+    /// Number of items.
     /// </summary>
     public int Count => Items.Count;
 }
 
 /// <summary>
-/// Context for generating from a projected item.
+/// Non-generic batch context alias for GenerateAll.
+/// </summary>
+public sealed class BatchContext
+{
+    internal BatchContext(IReadOnlyList<GenerationItem> items, ScopedLogger log)
+    {
+        Items = items;
+        Log = log;
+    }
+
+    /// <summary>
+    /// All items in this batch.
+    /// </summary>
+    public IReadOnlyList<GenerationItem> Items { get; }
+
+    /// <summary>
+    /// The diagnostic logger.
+    /// </summary>
+    public ScopedLogger Log { get; }
+
+    /// <summary>
+    /// Convenience property to get just the type symbols.
+    /// </summary>
+    public IEnumerable<INamedTypeSymbol> Types => Items.Select(i => i.Type);
+
+    /// <summary>
+    /// Number of items.
+    /// </summary>
+    public int Count => Items.Count;
+}
+
+/// <summary>
+/// Context for generating from a single projected item.
 /// </summary>
 /// <typeparam name="T">The projected type.</typeparam>
 public sealed class ProjectedGenerationContext<T>
 {
-    internal ProjectedGenerationContext(T value, INamedTypeSymbol symbol, ScopedLogger log)
+    internal ProjectedGenerationContext(T value, INamedTypeSymbol sourceType, ScopedLogger log)
     {
         Value = value;
-        Symbol = symbol;
+        SourceType = sourceType;
         Log = log;
     }
 
@@ -201,19 +193,14 @@ public sealed class ProjectedGenerationContext<T>
     public T Value { get; }
 
     /// <summary>
-    /// The source type symbol.
+    /// The original source type symbol.
     /// </summary>
-    public INamedTypeSymbol Symbol { get; }
+    public INamedTypeSymbol SourceType { get; }
 
     /// <summary>
     /// The diagnostic logger.
     /// </summary>
     public ScopedLogger Log { get; }
-
-    /// <summary>
-    /// Gets the type's first source location, useful for diagnostics.
-    /// </summary>
-    public Location? Location => Symbol.Locations.FirstOrDefault();
 }
 
 /// <summary>
@@ -222,16 +209,16 @@ public sealed class ProjectedGenerationContext<T>
 /// <typeparam name="T">The projected type.</typeparam>
 public sealed class ProjectedCollectionContext<T>
 {
-    internal ProjectedCollectionContext(IReadOnlyList<(T Value, INamedTypeSymbol Symbol)> items, ScopedLogger log)
+    internal ProjectedCollectionContext(IReadOnlyList<(T Value, INamedTypeSymbol SourceType)> items, ScopedLogger log)
     {
         Items = items;
         Log = log;
     }
 
     /// <summary>
-    /// All projected items with their source symbols.
+    /// All projected items with their source types.
     /// </summary>
-    public IReadOnlyList<(T Value, INamedTypeSymbol Symbol)> Items { get; }
+    public IReadOnlyList<(T Value, INamedTypeSymbol SourceType)> Items { get; }
 
     /// <summary>
     /// The diagnostic logger.
@@ -256,7 +243,7 @@ public sealed class ProjectedCollectionContext<T>
 /// <typeparam name="T">The projected type.</typeparam>
 public sealed class ProjectedGroupContext<TKey, T>
 {
-    internal ProjectedGroupContext(TKey key, IReadOnlyList<(T Value, INamedTypeSymbol Symbol)> items, ScopedLogger log)
+    internal ProjectedGroupContext(TKey key, IReadOnlyList<(T Value, INamedTypeSymbol SourceType)> items, ScopedLogger log)
     {
         Key = key;
         Items = items;
@@ -269,9 +256,9 @@ public sealed class ProjectedGroupContext<TKey, T>
     public TKey Key { get; }
 
     /// <summary>
-    /// All items in this group with their source symbols.
+    /// All projected items in this group with their source types.
     /// </summary>
-    public IReadOnlyList<(T Value, INamedTypeSymbol Symbol)> Items { get; }
+    public IReadOnlyList<(T Value, INamedTypeSymbol SourceType)> Items { get; }
 
     /// <summary>
     /// The diagnostic logger.
@@ -284,27 +271,27 @@ public sealed class ProjectedGroupContext<TKey, T>
     public IEnumerable<T> Values => Items.Select(i => i.Value);
 
     /// <summary>
-    /// Number of items in the group.
+    /// Number of items.
     /// </summary>
     public int Count => Items.Count;
 }
 
 /// <summary>
-/// Context for generating from flattened items.
+/// Context for generating from a flattened collection of items.
 /// </summary>
 /// <typeparam name="T">The flattened item type.</typeparam>
 public sealed class FlattenedCollectionContext<T>
 {
-    internal FlattenedCollectionContext(IReadOnlyList<(T Value, INamedTypeSymbol? SourceSymbol)> items, ScopedLogger log)
+    internal FlattenedCollectionContext(IReadOnlyList<(T Value, INamedTypeSymbol? SourceType)> items, ScopedLogger log)
     {
         Items = items;
         Log = log;
     }
 
     /// <summary>
-    /// All flattened items with their source symbols.
+    /// All flattened items with their source types.
     /// </summary>
-    public IReadOnlyList<(T Value, INamedTypeSymbol? SourceSymbol)> Items { get; }
+    public IReadOnlyList<(T Value, INamedTypeSymbol? SourceType)> Items { get; }
 
     /// <summary>
     /// The diagnostic logger.

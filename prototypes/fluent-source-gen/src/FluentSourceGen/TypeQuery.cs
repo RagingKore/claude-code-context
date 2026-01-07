@@ -1233,11 +1233,10 @@ public sealed class TypeQuery
     }
 
     /// <summary>
-    /// Collect all matching types and generate source file(s) using a context that provides
-    /// access to all items and the diagnostic logger.
+    /// Collect all matching types and generate source file(s) using a batch context.
     /// </summary>
-    /// <param name="generator">Function that receives a CollectionGenerationContext and returns hint name and source (or null to skip).</param>
-    public void GenerateAll(Func<CollectionGenerationContext, (string HintName, string Source)?> generator)
+    /// <param name="generator">Function that receives a BatchContext and returns hint name and source (or null to skip).</param>
+    public void GenerateAll(Func<BatchContext, (string HintName, string Source)?> generator)
     {
         var provider = Build();
         var ctx = _context;
@@ -1253,7 +1252,7 @@ public sealed class TypeQuery
                 if (items.Count == 0) return;
 
                 var log = ctx.Log.For(spc);
-                var genCtx = new CollectionGenerationContext(items, log);
+                var genCtx = new BatchContext(items, log);
                 try
                 {
                     var result = generator(genCtx);

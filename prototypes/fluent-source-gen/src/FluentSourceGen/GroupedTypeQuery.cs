@@ -62,8 +62,8 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     /// Generate source code for each group using a context that provides access to
     /// the group key, items, and diagnostic logger.
     /// </summary>
-    /// <param name="generator">Function that receives a GroupGenerationContext and returns hint name and source (or null to skip).</param>
-    public void Generate(Func<GroupGenerationContext<TKey>, (string HintName, string Source)?> generator)
+    /// <param name="generator">Function that receives a BatchContext and returns hint name and source (or null to skip).</param>
+    public void Generate(Func<BatchContext<TKey>, (string HintName, string Source)?> generator)
     {
         var provider = Build();
         var ctx = _context;
@@ -75,7 +75,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
                 var log = ctx.Log.For(spc);
                 foreach (var group in groupedResult.GetGroups())
                 {
-                    var genCtx = new GroupGenerationContext<TKey>(group.Key, group.Items, log);
+                    var genCtx = new BatchContext<TKey>(group.Key, group.Items, log);
                     try
                     {
                         var result = generator(genCtx);
