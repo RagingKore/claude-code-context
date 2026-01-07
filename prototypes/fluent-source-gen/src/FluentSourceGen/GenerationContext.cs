@@ -23,83 +23,29 @@ public sealed class GenerationContext
     /// The diagnostic logger for reporting errors, warnings, and info.
     /// </summary>
     public ScopedLogger Log { get; }
-
-    /// <summary>
-    /// Gets the type's first source location, useful for diagnostics.
-    /// </summary>
-    public Location? Location => Type.Locations.FirstOrDefault();
-}
-
-/// <summary>
-/// Represents a single item in a batch context.
-/// </summary>
-public sealed class GenerationItem
-{
-    internal GenerationItem(INamedTypeSymbol type)
-    {
-        Type = type;
-    }
-
-    /// <summary>
-    /// The type being processed.
-    /// </summary>
-    public INamedTypeSymbol Type { get; }
 }
 
 /// <summary>
 /// Context provided to GenerateAll and grouped Generate callbacks.
 /// </summary>
-/// <typeparam name="TKey">The type of the grouping key.</typeparam>
-public sealed class BatchContext<TKey>
-{
-    internal BatchContext(TKey? key, IReadOnlyList<GenerationItem> items, ScopedLogger log)
-    {
-        Key = key;
-        Items = items;
-        Log = log;
-    }
-
-    /// <summary>
-    /// The grouping key.
-    /// </summary>
-    public TKey? Key { get; }
-
-    /// <summary>
-    /// All items in this batch/group.
-    /// </summary>
-    public IReadOnlyList<GenerationItem> Items { get; }
-
-    /// <summary>
-    /// The diagnostic logger.
-    /// </summary>
-    public ScopedLogger Log { get; }
-
-    /// <summary>
-    /// Convenience property to get just the type symbols.
-    /// </summary>
-    public IEnumerable<INamedTypeSymbol> Types => Items.Select(i => i.Type);
-
-    /// <summary>
-    /// Number of items.
-    /// </summary>
-    public int Count => Items.Count;
-}
-
-/// <summary>
-/// Non-generic batch context for GenerateAll.
-/// </summary>
 public sealed class BatchContext
 {
-    internal BatchContext(IReadOnlyList<GenerationItem> items, ScopedLogger log)
+    internal BatchContext(IReadOnlyList<INamedTypeSymbol> types, ScopedLogger log, object? key = null)
     {
-        Items = items;
+        Types = types;
         Log = log;
+        Key = key;
     }
 
     /// <summary>
-    /// All items in this batch.
+    /// The grouping key (null for non-grouped batches).
     /// </summary>
-    public IReadOnlyList<GenerationItem> Items { get; }
+    public object? Key { get; }
+
+    /// <summary>
+    /// All types in this batch/group.
+    /// </summary>
+    public IReadOnlyList<INamedTypeSymbol> Types { get; }
 
     /// <summary>
     /// The diagnostic logger.
@@ -107,23 +53,23 @@ public sealed class BatchContext
     public ScopedLogger Log { get; }
 
     /// <summary>
-    /// Convenience property to get just the type symbols.
+    /// Number of types.
     /// </summary>
-    public IEnumerable<INamedTypeSymbol> Types => Items.Select(i => i.Type);
+    public int Count => Types.Count;
 
     /// <summary>
-    /// Number of items.
+    /// Gets the key as a specific type.
     /// </summary>
-    public int Count => Items.Count;
+    public TKey? GetKey<TKey>() => Key is TKey key ? key : default;
 }
 
 /// <summary>
 /// Context for generating from a single projected item.
 /// </summary>
 /// <typeparam name="T">The projected type.</typeparam>
-public sealed class ProjectedGenerationContext<T>
+public sealed class ProjectedContext<T>
 {
-    internal ProjectedGenerationContext(T value, INamedTypeSymbol sourceType, ScopedLogger log)
+    internal ProjectedContext(T value, INamedTypeSymbol sourceType, ScopedLogger log)
     {
         Value = value;
         SourceType = sourceType;
@@ -150,18 +96,24 @@ public sealed class ProjectedGenerationContext<T>
 /// Context for generating from a collection of projected items.
 /// </summary>
 /// <typeparam name="T">The projected type.</typeparam>
-public sealed class ProjectedCollectionContext<T>
+public sealed class ProjectedBatchContext<T>
 {
-    internal ProjectedCollectionContext(IReadOnlyList<(T Value, INamedTypeSymbol SourceType)> items, ScopedLogger log)
+    internal ProjectedBatchContext(IReadOnlyList<SourcedValue<T>> items, ScopedLogger log, object? key = null)
     {
         Items = items;
         Log = log;
+        Key = key;
     }
+
+    /// <summary>
+    /// The grouping key (null for non-grouped batches).
+    /// </summary>
+    public object? Key { get; }
 
     /// <summary>
     /// All projected items with their source types.
     /// </summary>
-    public IReadOnlyList<(T Value, INamedTypeSymbol SourceType)> Items { get; }
+    public IReadOnlyList<SourcedValue<T>> Items { get; }
 
     /// <summary>
     /// The diagnostic logger.
@@ -177,77 +129,15 @@ public sealed class ProjectedCollectionContext<T>
     /// Number of items.
     /// </summary>
     public int Count => Items.Count;
+
+    /// <summary>
+    /// Gets the key as a specific type.
+    /// </summary>
+    public TKey? GetKey<TKey>() => Key is TKey key ? key : default;
 }
 
 /// <summary>
-/// Context for generating from a group of projected items.
+/// A value with its source type symbol.
 /// </summary>
-/// <typeparam name="TKey">The grouping key type.</typeparam>
-/// <typeparam name="T">The projected type.</typeparam>
-public sealed class ProjectedGroupContext<TKey, T>
-{
-    internal ProjectedGroupContext(TKey key, IReadOnlyList<(T Value, INamedTypeSymbol SourceType)> items, ScopedLogger log)
-    {
-        Key = key;
-        Items = items;
-        Log = log;
-    }
-
-    /// <summary>
-    /// The grouping key.
-    /// </summary>
-    public TKey Key { get; }
-
-    /// <summary>
-    /// All projected items in this group with their source types.
-    /// </summary>
-    public IReadOnlyList<(T Value, INamedTypeSymbol SourceType)> Items { get; }
-
-    /// <summary>
-    /// The diagnostic logger.
-    /// </summary>
-    public ScopedLogger Log { get; }
-
-    /// <summary>
-    /// Convenience property to get just the values.
-    /// </summary>
-    public IEnumerable<T> Values => Items.Select(i => i.Value);
-
-    /// <summary>
-    /// Number of items.
-    /// </summary>
-    public int Count => Items.Count;
-}
-
-/// <summary>
-/// Context for generating from a flattened collection of items.
-/// </summary>
-/// <typeparam name="T">The flattened item type.</typeparam>
-public sealed class FlattenedCollectionContext<T>
-{
-    internal FlattenedCollectionContext(IReadOnlyList<(T Value, INamedTypeSymbol? SourceType)> items, ScopedLogger log)
-    {
-        Items = items;
-        Log = log;
-    }
-
-    /// <summary>
-    /// All flattened items with their source types.
-    /// </summary>
-    public IReadOnlyList<(T Value, INamedTypeSymbol? SourceType)> Items { get; }
-
-    /// <summary>
-    /// The diagnostic logger.
-    /// </summary>
-    public ScopedLogger Log { get; }
-
-    /// <summary>
-    /// Convenience property to get just the values.
-    /// </summary>
-    public IEnumerable<T> Values => Items.Select(i => i.Value);
-
-    /// <summary>
-    /// Number of items.
-    /// </summary>
-    public int Count => Items.Count;
-}
+/// <typeparam name="T">The value type.</typeparam>
+public readonly record struct SourcedValue<T>(T Value, INamedTypeSymbol? SourceType);

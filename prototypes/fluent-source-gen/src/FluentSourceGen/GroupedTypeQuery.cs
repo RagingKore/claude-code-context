@@ -59,11 +59,11 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
     #region Generate Methods (Terminal Operations)
 
     /// <summary>
-    /// Generate source code for each group using a context that provides access to
-    /// the group key, items, and diagnostic logger.
+    /// Generate source code for each group using a batch context.
+    /// Access the key via ctx.GetKey&lt;TKey&gt;().
     /// </summary>
     /// <param name="generator">Function that receives a BatchContext and returns hint name and source (or null to skip).</param>
-    public void Generate(Func<BatchContext<TKey>, (string HintName, string Source)?> generator)
+    public void Generate(Func<BatchContext, (string HintName, string Source)?> generator)
     {
         var provider = Build();
         var ctx = _context;
@@ -75,7 +75,7 @@ public sealed class GroupedTypeQuery<TKey> where TKey : notnull
                 var log = ctx.Log.For(spc);
                 foreach (var group in groupedResult.GetGroups())
                 {
-                    var genCtx = new BatchContext<TKey>(group.Key, group.Items, log);
+                    var genCtx = new BatchContext(group.Types, log, group.Key);
                     try
                     {
                         var result = generator(genCtx);
@@ -185,18 +185,13 @@ public readonly struct TypeGroup<TKey>
     public TKey Key { get; }
 
     /// <summary>
-    /// The items in this group.
+    /// The types in this group.
     /// </summary>
-    public IReadOnlyList<GenerationItem> Items { get; }
+    public IReadOnlyList<INamedTypeSymbol> Types { get; }
 
-    /// <summary>
-    /// Convenience property to get just the type symbols.
-    /// </summary>
-    public IEnumerable<INamedTypeSymbol> Types => Items.Select(i => i.Type);
-
-    internal TypeGroup(TKey key, IReadOnlyList<INamedTypeSymbol> symbols)
+    internal TypeGroup(TKey key, IReadOnlyList<INamedTypeSymbol> types)
     {
         Key = key;
-        Items = symbols.Select(s => new GenerationItem(s)).ToList();
+        Types = types;
     }
 }

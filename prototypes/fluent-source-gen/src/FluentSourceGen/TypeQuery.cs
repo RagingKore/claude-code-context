@@ -1117,42 +1117,8 @@ public sealed class TypeQuery
         var provider = Build();
         var projected = provider.Select((result, _) =>
             result.Symbol is not null
-                ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol))
-                : new ProjectedItem<T>(null, default));
-
-        return new ProjectedTypeQuery<T>(projected, _context);
-    }
-
-    /// <summary>
-    /// Project each matching type with attribute data.
-    /// </summary>
-    public ProjectedTypeQuery<T> Select<T>(Func<INamedTypeSymbol, AttributeMatch, T> selector)
-    {
-        if (_attributePatterns.Count == 0)
-            throw new InvalidOperationException("WithAttribute must be called before using this overload");
-
-        var provider = Build();
-        var projected = provider.Select((result, _) =>
-            result.Symbol is not null && result.Attributes.Count > 0
-                ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new AttributeMatch(result.Attributes[0])))
-                : new ProjectedItem<T>(null, default));
-
-        return new ProjectedTypeQuery<T>(projected, _context);
-    }
-
-    /// <summary>
-    /// Project each matching type with interface data.
-    /// </summary>
-    public ProjectedTypeQuery<T> Select<T>(Func<INamedTypeSymbol, InterfaceMatch, T> selector)
-    {
-        if (_interfacePatterns.Count == 0)
-            throw new InvalidOperationException("Implementing must be called before using this overload");
-
-        var provider = Build();
-        var projected = provider.Select((result, _) =>
-            result.Symbol is not null && result.Interfaces.Count > 0
-                ? new ProjectedItem<T>(result.Symbol, selector(result.Symbol, new InterfaceMatch(result.Interfaces[0])))
-                : new ProjectedItem<T>(null, default));
+                ? new SourcedValue<T>(selector(result.Symbol), result.Symbol)
+                : new SourcedValue<T>(default!, null));
 
         return new ProjectedTypeQuery<T>(projected, _context);
     }
@@ -1166,31 +1132,10 @@ public sealed class TypeQuery
         var flattened = provider.SelectMany((result, _) =>
         {
             if (result.Symbol is null)
-                return Enumerable.Empty<FlattenedItem<T>>();
+                return Enumerable.Empty<SourcedValue<T>>();
 
             return selector(result.Symbol)
-                .Select(value => new FlattenedItem<T>(result.Symbol, value));
-        });
-
-        return new FlattenedTypeQuery<T>(flattened, _context);
-    }
-
-    /// <summary>
-    /// Project each matching type with attribute data to multiple values and flatten.
-    /// </summary>
-    public FlattenedTypeQuery<T> SelectMany<T>(Func<INamedTypeSymbol, AttributeMatch, IEnumerable<T>> selector)
-    {
-        if (_attributePatterns.Count == 0)
-            throw new InvalidOperationException("WithAttribute must be called before using this overload");
-
-        var provider = Build();
-        var flattened = provider.SelectMany((result, _) =>
-        {
-            if (result.Symbol is null || result.Attributes.Count == 0)
-                return Enumerable.Empty<FlattenedItem<T>>();
-
-            return selector(result.Symbol, new AttributeMatch(result.Attributes[0]))
-                .Select(value => new FlattenedItem<T>(result.Symbol, value));
+                .Select(value => new SourcedValue<T>(value, result.Symbol));
         });
 
         return new FlattenedTypeQuery<T>(flattened, _context);
@@ -1245,14 +1190,14 @@ public sealed class TypeQuery
         {
             ctx.RoslynContext.RegisterSourceOutput(provider.Collect(), (spc, results) =>
             {
-                var items = results
+                var types = results
                     .Where(r => r.Symbol is not null)
-                    .Select(r => new GenerationItem(r.Symbol!))
+                    .Select(r => r.Symbol!)
                     .ToList();
-                if (items.Count == 0) return;
+                if (types.Count == 0) return;
 
                 var log = ctx.Log.For(spc);
-                var genCtx = new BatchContext(items, log);
+                var genCtx = new BatchContext(types, log);
                 try
                 {
                     var result = generator(genCtx);
@@ -1371,7 +1316,7 @@ public sealed class TypeQuery
                         return default;
                 }
 
-                return new QueryResult(symbol, matchedAttributes, matchedInterfaces);
+                return new QueryResult(symbol);
             }
         ).Where(static result => result.Symbol is not null);
     }
@@ -1513,16 +1458,7 @@ public sealed class TypeQuery
     #endregion
 
     /// <summary>
-    /// Result of a type query containing the symbol and matched attributes/interfaces.
+    /// Result of a type query containing the matched symbol.
     /// </summary>
-    public readonly record struct QueryResult(
-        INamedTypeSymbol? Symbol,
-        List<AttributeData> Attributes,
-        List<INamedTypeSymbol> Interfaces)
-    {
-        /// <summary>
-        /// Creates an empty query result.
-        /// </summary>
-        public QueryResult() : this(null, [], []) { }
-    }
+    public readonly record struct QueryResult(INamedTypeSymbol? Symbol);
 }

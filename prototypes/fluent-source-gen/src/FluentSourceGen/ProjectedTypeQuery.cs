@@ -9,10 +9,10 @@ namespace FluentSourceGen;
 /// <typeparam name="T">The projected type.</typeparam>
 public sealed class ProjectedTypeQuery<T>
 {
-    readonly IncrementalValuesProvider<ProjectedItem<T>> _provider;
+    readonly IncrementalValuesProvider<SourcedValue<T>> _provider;
     readonly GeneratorContext _context;
 
-    internal ProjectedTypeQuery(IncrementalValuesProvider<ProjectedItem<T>> provider, GeneratorContext context)
+    internal ProjectedTypeQuery(IncrementalValuesProvider<SourcedValue<T>> provider, GeneratorContext context)
     {
         _provider = provider;
         _context = context;
@@ -34,8 +34,8 @@ public sealed class ProjectedTypeQuery<T>
     {
         var projected = _provider.Select((item, _) =>
             item.Value is not null
-                ? new ProjectedItem<TResult>(item.Symbol, selector(item.Value))
-                : new ProjectedItem<TResult>(item.Symbol, default));
+                ? new SourcedValue<TResult>(selector(item.Value), item.SourceType)
+                : new SourcedValue<TResult>(default!, item.SourceType));
 
         return new ProjectedTypeQuery<TResult>(projected, _context);
     }
@@ -75,7 +75,7 @@ public sealed class ProjectedTypeQuery<T>
     /// <summary>
     /// Generate source code for each projected item using a context.
     /// </summary>
-    public void Generate(Func<ProjectedGenerationContext<T>, string?> generator, string? suffix = null)
+    public void Generate(Func<ProjectedContext<T>, string?> generator, string? suffix = null)
     {
         var provider = Build();
         var ctx = _context;
@@ -84,27 +84,27 @@ public sealed class ProjectedTypeQuery<T>
         {
             ctx.RoslynContext.RegisterSourceOutput(provider, (spc, item) =>
             {
-                if (item.Value is null || item.Symbol is null) return;
+                if (item.Value is null || item.SourceType is null) return;
                 var log = ctx.Log.For(spc);
-                var genCtx = new ProjectedGenerationContext<T>(item.Value, item.Symbol, log);
+                var genCtx = new ProjectedContext<T>(item.Value, item.SourceType, log);
                 try
                 {
                     var source = generator(genCtx);
                     if (source is null) return;
-                    ctx.AddSource(spc, ctx.GetHintName(item.Symbol, suffix), source, item.Symbol);
+                    ctx.AddSource(spc, ctx.GetHintName(item.SourceType, suffix), source, item.SourceType);
                 }
                 catch (Exception ex)
                 {
-                    ctx.ReportException(spc, item.Symbol.Name, ex, item.Symbol.Locations.FirstOrDefault());
+                    ctx.ReportException(spc, item.SourceType.Name, ex, item.SourceType.Locations.FirstOrDefault());
                 }
             });
         });
     }
 
     /// <summary>
-    /// Collect all projected items and generate source file(s) using a context.
+    /// Collect all projected items and generate source file(s) using a batch context.
     /// </summary>
-    public void GenerateAll(Func<ProjectedCollectionContext<T>, (string HintName, string Source)?> generator)
+    public void GenerateAll(Func<ProjectedBatchContext<T>, (string HintName, string Source)?> generator)
     {
         var provider = BuildCollected();
         var ctx = _context;
@@ -113,14 +113,13 @@ public sealed class ProjectedTypeQuery<T>
         {
             ctx.RoslynContext.RegisterSourceOutput(provider, (spc, items) =>
             {
-                var pairs = items
-                    .Where(i => i.Value is not null && i.Symbol is not null)
-                    .Select(i => (i.Value!, i.Symbol!))
+                var validItems = items
+                    .Where(i => i.Value is not null && i.SourceType is not null)
                     .ToList();
-                if (pairs.Count == 0) return;
+                if (validItems.Count == 0) return;
 
                 var log = ctx.Log.For(spc);
-                var genCtx = new ProjectedCollectionContext<T>(pairs, log);
+                var genCtx = new ProjectedBatchContext<T>(validItems, log);
                 try
                 {
                     var result = generator(genCtx);
@@ -143,16 +142,16 @@ public sealed class ProjectedTypeQuery<T>
     /// Builds the query and returns the incremental values provider.
     /// For advanced scenarios only - prefer using Generate() methods.
     /// </summary>
-    public IncrementalValuesProvider<ProjectedItem<T>> Build() => _provider;
+    public IncrementalValuesProvider<SourcedValue<T>> Build() => _provider;
 
     /// <summary>
     /// Builds the query and returns a collected provider for processing all items together.
     /// For advanced scenarios only - prefer using GenerateAll() methods.
     /// </summary>
-    public IncrementalValueProvider<IReadOnlyList<ProjectedItem<T>>> BuildCollected()
+    public IncrementalValueProvider<IReadOnlyList<SourcedValue<T>>> BuildCollected()
     {
         return _provider.Collect().Select((items, _) =>
-            (IReadOnlyList<ProjectedItem<T>>)items.Where(i => i.Value is not null).ToList());
+            (IReadOnlyList<SourcedValue<T>>)items.Where(i => i.Value is not null).ToList());
     }
 
     #endregion
@@ -165,10 +164,10 @@ public sealed class ProjectedTypeQuery<T>
 /// <typeparam name="T">The projected element type.</typeparam>
 public sealed class FlattenedTypeQuery<T>
 {
-    readonly IncrementalValuesProvider<FlattenedItem<T>> _provider;
+    readonly IncrementalValuesProvider<SourcedValue<T>> _provider;
     readonly GeneratorContext _context;
 
-    internal FlattenedTypeQuery(IncrementalValuesProvider<FlattenedItem<T>> provider, GeneratorContext context)
+    internal FlattenedTypeQuery(IncrementalValuesProvider<SourcedValue<T>> provider, GeneratorContext context)
     {
         _provider = provider;
         _context = context;
@@ -197,9 +196,9 @@ public sealed class FlattenedTypeQuery<T>
     #region Generate Methods (Terminal Operations)
 
     /// <summary>
-    /// Generate source code from all flattened items using a context.
+    /// Generate source code from all flattened items using a batch context.
     /// </summary>
-    public void GenerateAll(Func<FlattenedCollectionContext<T>, (string HintName, string Source)?> generator)
+    public void GenerateAll(Func<ProjectedBatchContext<T>, (string HintName, string Source)?> generator)
     {
         var provider = BuildCollected();
         var ctx = _context;
@@ -210,13 +209,12 @@ public sealed class FlattenedTypeQuery<T>
             {
                 if (items.Count == 0) return;
 
-                var pairs = items
+                var validItems = items
                     .Where(i => i.Value is not null)
-                    .Select(i => (i.Value!, i.SourceSymbol))
                     .ToList();
 
                 var log = ctx.Log.For(spc);
-                var genCtx = new FlattenedCollectionContext<T>(pairs, log);
+                var genCtx = new ProjectedBatchContext<T>(validItems, log);
                 try
                 {
                     var result = generator(genCtx);
@@ -239,16 +237,16 @@ public sealed class FlattenedTypeQuery<T>
     /// Builds the query and returns the incremental values provider.
     /// For advanced scenarios only.
     /// </summary>
-    public IncrementalValuesProvider<FlattenedItem<T>> Build() => _provider;
+    public IncrementalValuesProvider<SourcedValue<T>> Build() => _provider;
 
     /// <summary>
     /// Builds the query and returns a collected provider for processing all items together.
     /// For advanced scenarios only - prefer using GenerateAll() method.
     /// </summary>
-    public IncrementalValueProvider<IReadOnlyList<FlattenedItem<T>>> BuildCollected()
+    public IncrementalValueProvider<IReadOnlyList<SourcedValue<T>>> BuildCollected()
     {
         return _provider.Collect().Select((items, _) =>
-            (IReadOnlyList<FlattenedItem<T>>)items.Where(i => i.Value is not null).ToList());
+            (IReadOnlyList<SourcedValue<T>>)items.Where(i => i.Value is not null).ToList());
     }
 
     #endregion
@@ -260,13 +258,13 @@ public sealed class FlattenedTypeQuery<T>
 /// </summary>
 public sealed class ProjectedGroupedQuery<TKey, T> where TKey : notnull
 {
-    readonly IncrementalValuesProvider<ProjectedItem<T>> _provider;
+    readonly IncrementalValuesProvider<SourcedValue<T>> _provider;
     readonly Func<T, TKey> _keySelector;
     readonly GeneratorContext _context;
     readonly IEqualityComparer<TKey> _comparer;
 
     internal ProjectedGroupedQuery(
-        IncrementalValuesProvider<ProjectedItem<T>> provider,
+        IncrementalValuesProvider<SourcedValue<T>> provider,
         Func<T, TKey> keySelector,
         GeneratorContext context,
         IEqualityComparer<TKey>? comparer = null)
@@ -280,9 +278,10 @@ public sealed class ProjectedGroupedQuery<TKey, T> where TKey : notnull
     #region Generate Methods (Terminal Operations)
 
     /// <summary>
-    /// Generate source code for each projected group using a context.
+    /// Generate source code for each projected group using a batch context.
+    /// Access the key via ctx.GetKey&lt;TKey&gt;().
     /// </summary>
-    public void Generate(Func<ProjectedGroupContext<TKey, T>, (string HintName, string Source)?> generator)
+    public void Generate(Func<ProjectedBatchContext<T>, (string HintName, string Source)?> generator)
     {
         var provider = Build();
         var ctx = _context;
@@ -294,12 +293,7 @@ public sealed class ProjectedGroupedQuery<TKey, T> where TKey : notnull
                 var log = ctx.Log.For(spc);
                 foreach (var group in groupedResult.GetGroups())
                 {
-                    var items = group.Items
-                        .Where(i => i.Value is not null && i.Symbol is not null)
-                        .Select(i => (i.Value!, i.Symbol!))
-                        .ToList();
-
-                    var genCtx = new ProjectedGroupContext<TKey, T>(group.Key, items, log);
+                    var genCtx = new ProjectedBatchContext<T>(group.Items, log, group.Key);
                     try
                     {
                         var result = generator(genCtx);
@@ -346,12 +340,12 @@ public sealed class ProjectedGroupedQuery<TKey, T> where TKey : notnull
 /// </summary>
 public readonly struct ProjectedGroupedResult<TKey, T> where TKey : notnull
 {
-    readonly IReadOnlyList<ProjectedItem<T>> _items;
+    readonly IReadOnlyList<SourcedValue<T>> _items;
     readonly Func<T, TKey> _keySelector;
     readonly IEqualityComparer<TKey> _comparer;
 
     internal ProjectedGroupedResult(
-        IReadOnlyList<ProjectedItem<T>> items,
+        IReadOnlyList<SourcedValue<T>> items,
         Func<T, TKey> keySelector,
         IEqualityComparer<TKey> comparer)
     {
@@ -392,27 +386,16 @@ public readonly struct ProjectedGroup<TKey, T>
     /// <summary>
     /// The items in this group.
     /// </summary>
-    public IReadOnlyList<ProjectedItem<T>> Items { get; }
+    public IReadOnlyList<SourcedValue<T>> Items { get; }
 
     /// <summary>
     /// The values in this group.
     /// </summary>
-    public IReadOnlyList<T> Values { get; }
+    public IEnumerable<T> Values => Items.Where(i => i.Value is not null).Select(i => i.Value!);
 
-    internal ProjectedGroup(TKey key, IReadOnlyList<ProjectedItem<T>> items)
+    internal ProjectedGroup(TKey key, IReadOnlyList<SourcedValue<T>> items)
     {
         Key = key;
         Items = items;
-        Values = items.Where(i => i.Value is not null).Select(i => i.Value!).ToList();
     }
 }
-
-/// <summary>
-/// Represents a projected item with its source symbol.
-/// </summary>
-public readonly record struct ProjectedItem<T>(INamedTypeSymbol? Symbol, T? Value);
-
-/// <summary>
-/// Represents a flattened item from SelectMany with its source symbol.
-/// </summary>
-public readonly record struct FlattenedItem<T>(INamedTypeSymbol? SourceSymbol, T? Value);
