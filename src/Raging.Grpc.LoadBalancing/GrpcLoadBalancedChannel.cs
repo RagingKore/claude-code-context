@@ -15,9 +15,6 @@ public static class GrpcLoadBalancedChannel {
     /// <param name="configure">Configuration delegate.</param>
     /// <returns>A configured GrpcChannel with load balancing.</returns>
     public static GrpcChannel ForAddress(string address, Action<LoadBalancingBuilder> configure) {
-        ArgumentException.ThrowIfNullOrWhiteSpace(address);
-        ArgumentNullException.ThrowIfNull(configure);
-
         var primaryEndpoint = EndpointParser.Parse(address);
 
         var builder = new LoadBalancingBuilder();
@@ -35,9 +32,6 @@ public static class GrpcLoadBalancedChannel {
     public static GrpcChannel FromConfiguration(
         IConfiguration configuration,
         Action<LoadBalancingBuilder> configure) {
-
-        ArgumentNullException.ThrowIfNull(configuration);
-        ArgumentNullException.ThrowIfNull(configure);
 
         var options = configuration.Get<LoadBalancingOptions>();
 

@@ -18,8 +18,6 @@ internal sealed class PollingToStreamingAdapter<TNode> : IStreamingTopologySourc
     /// <param name="pollingSource">The polling source to adapt.</param>
     /// <param name="delay">The delay between polls.</param>
     public PollingToStreamingAdapter(IPollingTopologySource<TNode> pollingSource, TimeSpan delay) {
-        ArgumentNullException.ThrowIfNull(pollingSource);
-
         _pollingSource = pollingSource;
         _delay = delay;
     }

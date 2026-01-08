@@ -13,8 +13,6 @@ public static class EndpointParser {
     /// <returns>A <see cref="DnsEndPoint"/> representing the endpoint.</returns>
     /// <exception cref="LoadBalancingConfigurationException">Thrown when the format is invalid.</exception>
     public static DnsEndPoint Parse(string input) {
-        ArgumentException.ThrowIfNullOrWhiteSpace(input);
-
         var trimmed = input.Trim();
         var colonIndex = trimmed.LastIndexOf(':');
 
@@ -66,8 +64,6 @@ public static class EndpointParser {
     /// <param name="inputs">The endpoint strings in "host:port" format.</param>
     /// <returns>An array of <see cref="DnsEndPoint"/> representing the endpoints.</returns>
     /// <exception cref="LoadBalancingConfigurationException">Thrown when any format is invalid.</exception>
-    public static DnsEndPoint[] ParseMany(IEnumerable<string> inputs) {
-        ArgumentNullException.ThrowIfNull(inputs);
-        return inputs.Select(Parse).ToArray();
-    }
+    public static DnsEndPoint[] ParseMany(IEnumerable<string> inputs) =>
+        inputs.Select(Parse).ToArray();
 }

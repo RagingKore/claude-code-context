@@ -82,8 +82,6 @@ public sealed class LoadBalancingBuilder {
         TimeSpan? delay = null)
         where TNode : struct, IClusterNode {
 
-        ArgumentNullException.ThrowIfNull(source);
-
         _topologySource = source;
         _nodeType = typeof(TNode);
         _isStreaming = false;
@@ -98,8 +96,6 @@ public sealed class LoadBalancingBuilder {
     public LoadBalancingBuilder WithStreamingTopologySource<TNode>(
         IStreamingTopologySource<TNode> source)
         where TNode : struct, IClusterNode {
-
-        ArgumentNullException.ThrowIfNull(source);
 
         _topologySource = source;
         _nodeType = typeof(TNode);

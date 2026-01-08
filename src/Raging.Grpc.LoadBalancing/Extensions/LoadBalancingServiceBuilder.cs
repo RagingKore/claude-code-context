@@ -110,8 +110,6 @@ public sealed class LoadBalancingServiceBuilder {
         TimeSpan? delay = null)
         where TNode : struct, IClusterNode {
 
-        ArgumentNullException.ThrowIfNull(source);
-
         _topologySourceInstance = source;
         _nodeType = typeof(TNode);
         _isStreaming = false;
@@ -129,8 +127,6 @@ public sealed class LoadBalancingServiceBuilder {
         Func<IServiceProvider, IPollingTopologySource<TNode>> factory,
         TimeSpan? delay = null)
         where TNode : struct, IClusterNode {
-
-        ArgumentNullException.ThrowIfNull(factory);
 
         _topologySourceFactory = sp => factory(sp);
         _nodeType = typeof(TNode);
@@ -170,8 +166,6 @@ public sealed class LoadBalancingServiceBuilder {
         IStreamingTopologySource<TNode> source)
         where TNode : struct, IClusterNode {
 
-        ArgumentNullException.ThrowIfNull(source);
-
         _topologySourceInstance = source;
         _nodeType = typeof(TNode);
         _isStreaming = true;
@@ -188,8 +182,6 @@ public sealed class LoadBalancingServiceBuilder {
     public LoadBalancingServiceBuilder WithStreamingTopologySource<TNode>(
         Func<IServiceProvider, IStreamingTopologySource<TNode>> factory)
         where TNode : struct, IClusterNode {
-
-        ArgumentNullException.ThrowIfNull(factory);
 
         _topologySourceFactory = sp => factory(sp);
         _nodeType = typeof(TNode);

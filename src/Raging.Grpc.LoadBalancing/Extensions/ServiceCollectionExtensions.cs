@@ -16,13 +16,8 @@ public static class ServiceCollectionExtensions {
     /// <returns>A builder for configuring load balancing.</returns>
     public static LoadBalancingServiceBuilder AddGrpcLoadBalancing(
         this IServiceCollection services,
-        string address) {
-
-        ArgumentNullException.ThrowIfNull(services);
-        ArgumentException.ThrowIfNullOrWhiteSpace(address);
-
-        return new LoadBalancingServiceBuilder(services, address);
-    }
+        string address) =>
+        new(services, address);
 
     /// <summary>
     /// Add gRPC load balancing from configuration.
@@ -35,10 +30,6 @@ public static class ServiceCollectionExtensions {
         this IServiceCollection services,
         string address,
         IConfiguration configuration) {
-
-        ArgumentNullException.ThrowIfNull(services);
-        ArgumentException.ThrowIfNullOrWhiteSpace(address);
-        ArgumentNullException.ThrowIfNull(configuration);
 
         var builder = new LoadBalancingServiceBuilder(services, address);
         var options = configuration.Get<LoadBalancingOptions>();
