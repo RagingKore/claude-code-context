@@ -215,7 +215,6 @@ public sealed class LoadBalancingBuilder {
             streamingSource,
             seeds,
             _resilience,
-            _delay ?? TimeSpan.Zero,
             seedChannelPool,
             loggerFactory);
 

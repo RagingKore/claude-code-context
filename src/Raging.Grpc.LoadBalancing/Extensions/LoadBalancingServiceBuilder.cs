@@ -359,7 +359,6 @@ public sealed class LoadBalancingServiceBuilder {
             streamingSource,
             seeds,
             resilience,
-            delay,
             seedChannelPool,
             loggerFactory);
 
