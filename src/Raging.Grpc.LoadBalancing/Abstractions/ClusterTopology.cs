@@ -1,3 +1,5 @@
+using System.Collections.Immutable;
+
 namespace Raging.Grpc.LoadBalancing;
 
 /// <summary>
@@ -5,81 +7,65 @@ namespace Raging.Grpc.LoadBalancing;
 /// </summary>
 /// <typeparam name="TNode">The node type implementing <see cref="IClusterNode"/>.</typeparam>
 public readonly record struct ClusterTopology<TNode>(
-    IReadOnlyList<TNode> Nodes
+    ImmutableArray<TNode> Nodes
 ) where TNode : struct, IClusterNode {
 
-    /// <summary>
-    /// An empty topology with no nodes.
-    /// </summary>
-    public static ClusterTopology<TNode> Empty => new([]);
+    readonly int _cachedHashCode;
+    readonly int _eligibleCount;
 
-    /// <summary>
-    /// Whether this topology has no nodes.
-    /// </summary>
-    public bool IsEmpty => Nodes.Count == 0;
-
-    /// <summary>
-    /// The number of nodes in this topology.
-    /// </summary>
-    public int Count => Nodes.Count;
-
-    /// <summary>
-    /// Gets the number of eligible nodes.
-    /// </summary>
-    public int EligibleCount => Nodes.Count(n => n.IsEligible);
-
-    /// <summary>
-    /// Computes the difference between this topology and another.
-    /// </summary>
-    /// <param name="other">The other topology to compare against.</param>
-    /// <returns>The number of nodes added and removed.</returns>
-    public (int Added, int Removed) ComputeDiff(ClusterTopology<TNode> other) {
-        var thisEndpoints = Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port)).ToHashSet();
-        var otherEndpoints = other.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port)).ToHashSet();
-
-        return (
-            otherEndpoints.Count(e => !thisEndpoints.Contains(e)),
-            thisEndpoints.Count(e => !otherEndpoints.Contains(e))
-        );
+    public ClusterTopology(ImmutableArray<TNode> nodes) : this() {
+        Nodes = nodes;
+        _cachedHashCode = ComputeHashCode(nodes);
+        _eligibleCount = CountEligible(nodes);
     }
 
-    /// <summary>
-    /// Value equality based on node endpoints, eligibility, and priority.
-    /// </summary>
+    public static ClusterTopology<TNode> Empty => new(ImmutableArray<TNode>.Empty);
+    public bool IsEmpty => Nodes.IsDefaultOrEmpty;
+    public int Count => Nodes.IsDefaultOrEmpty ? 0 : Nodes.Length;
+    public int EligibleCount => _eligibleCount;
+
     public bool Equals(ClusterTopology<TNode> other) {
-        if (Nodes is null && other.Nodes is null)
-            return true;
+        if (Nodes.Equals(other.Nodes)) return true;
+        if (Count != other.Count) return false;
+        if (IsEmpty) return true;
 
-        if (Nodes is null || other.Nodes is null)
+        if (_cachedHashCode != 0 && other._cachedHashCode != 0 && _cachedHashCode != other._cachedHashCode)
             return false;
 
-        if (Count != other.Count)
-            return false;
-
-        var thisSet = Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port, n.IsEligible, n.Priority)).ToHashSet();
-        var otherSet = other.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port, n.IsEligible, n.Priority)).ToHashSet();
-
-        return thisSet.SetEquals(otherSet);
+        var otherSet = new HashSet<TNode>(other.Nodes);
+        foreach (var n in Nodes)
+            if (!otherSet.Contains(n)) return false;
+        return true;
     }
 
-    /// <summary>
-    /// Hash code consistent with value equality.
-    /// </summary>
-    public override int GetHashCode() {
-        if (Nodes is null)
-            return 0;
+    public override int GetHashCode() => _cachedHashCode;
 
-        var hash = new HashCode();
-        hash.Add(Count);
+    static int ComputeHashCode(ImmutableArray<TNode> nodes) {
+        if (nodes.IsDefaultOrEmpty) return 0;
+        int hashSum = 0;
+        foreach (var n in nodes)
+            unchecked { hashSum += n.GetHashCode(); }
+        return HashCode.Combine(nodes.Length, hashSum);
+    }
 
-        // Use sorted order for deterministic hash
-        foreach (var node in Nodes.OrderBy(n => n.EndPoint.Host).ThenBy(n => n.EndPoint.Port)) {
-            hash.Add(node.EndPoint.Host);
-            hash.Add(node.EndPoint.Port);
-            hash.Add(node.IsEligible);
-            hash.Add(node.Priority);
-        }
+    static int CountEligible(ImmutableArray<TNode> nodes) {
+        if (nodes.IsDefaultOrEmpty) return 0;
+        int count = 0;
+        foreach (var n in nodes)
+            if (n.IsEligible) count++;
+        return count;
+    }
 
-        return hash.ToHashCode();
+    public (int Added, int Removed) ComputeDiff(ClusterTopology<TNode> other) {
+        if (Nodes.Equals(other.Nodes)) return (0, 0);
+
+        var thisSet = new HashSet<TNode>(Nodes);
+        var otherSet = new HashSet<TNode>(other.Nodes);
+
+        int added = 0, removed = 0;
+        foreach (var n in other.Nodes) if (!thisSet.Contains(n)) added++;
+        foreach (var n in Nodes) if (!otherSet.Contains(n)) removed++;
+
+        return (added, removed);
     }
 }

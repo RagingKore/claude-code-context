@@ -12,8 +12,9 @@ public interface IStreamingTopologySource<TNode> : IComparer<TNode>
     /// Each yielded value is the complete current topology (snapshot model).
     /// </summary>
     /// <param name="context">The topology context containing channel and cancellation info.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>An async enumerable of topology snapshots.</returns>
-    IAsyncEnumerable<ClusterTopology<TNode>> SubscribeAsync(TopologyContext context);
+    IAsyncEnumerable<ClusterTopology<TNode>> SubscribeAsync(TopologyContext context, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Default comparison: sort by Priority ascending.
