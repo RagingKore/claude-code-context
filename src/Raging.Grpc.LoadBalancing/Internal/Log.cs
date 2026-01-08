@@ -24,11 +24,6 @@ internal static partial class Log {
     public static partial void TopologyCallFailed(this ILogger logger, DnsEndPoint endpoint, Exception exception);
 
     [LoggerMessage(
-        Level = LogLevel.Warning,
-        Message = "All seeds failed, attempt {Attempt}/{MaxAttempts}, backing off {BackoffMs}ms")]
-    public static partial void AllSeedsFailed(this ILogger logger, int attempt, int maxAttempts, int backoffMs);
-
-    [LoggerMessage(
         Level = LogLevel.Debug,
         Message = "Topology refresh triggered by status code {StatusCode}")]
     public static partial void RefreshTriggered(this ILogger logger, StatusCode statusCode);
@@ -44,21 +39,6 @@ internal static partial class Log {
     public static partial void PickerUpdated(this ILogger logger, int subchannelCount, int topTierCount);
 
     [LoggerMessage(
-        Level = LogLevel.Debug,
-        Message = "Starting periodic topology refresh with delay {DelaySeconds}s")]
-    public static partial void StartingPeriodicRefresh(this ILogger logger, double delaySeconds);
-
-    [LoggerMessage(
-        Level = LogLevel.Debug,
-        Message = "Stopping topology refresh")]
-    public static partial void StoppingRefresh(this ILogger logger);
-
-    [LoggerMessage(
-        Level = LogLevel.Error,
-        Message = "Cluster discovery failed after {Attempts} attempts")]
-    public static partial void DiscoveryFailed(this ILogger logger, int attempts, Exception exception);
-
-    [LoggerMessage(
         Level = LogLevel.Warning,
         Message = "No eligible nodes in topology, total nodes: {TotalNodes}")]
     public static partial void NoEligibleNodes(this ILogger logger, int totalNodes);
@@ -72,4 +52,9 @@ internal static partial class Log {
         Level = LogLevel.Debug,
         Message = "Disposing seed channel pool with {ChannelCount} channels")]
     public static partial void DisposingSeedChannelPool(this ILogger logger, int channelCount);
+
+    [LoggerMessage(
+        Level = LogLevel.Warning,
+        Message = "Topology stream from {Endpoint} ended without returning any data")]
+    public static partial void TopologyStreamEmpty(this ILogger logger, DnsEndPoint endpoint);
 }

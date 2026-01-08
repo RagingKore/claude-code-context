@@ -49,129 +49,58 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
     }
 
     async Task SubscribeLoopAsync(CancellationToken ct) {
-        var attempt = 0;
+        var seedIndex = 0;
 
         while (!ct.IsCancellationRequested) {
-            attempt++;
-
-            // Try parallel fan-out to all seeds, consume from first success
-            var success = await TrySubscribeToAnySeedAsync(ct).ConfigureAwait(false);
-
-            if (success) {
-                attempt = 0; // Reset on success
-            }
-            else {
-                // All seeds failed - backoff and retry
-                if (attempt < _resilience.MaxDiscoveryAttempts) {
-                    var backoff = BackoffCalculator.Calculate(attempt, _resilience.InitialBackoff, _resilience.MaxBackoff);
-                    _logger.AllSeedsFailed(attempt, _resilience.MaxDiscoveryAttempts, (int)backoff.TotalMilliseconds);
-
-                    try {
-                        await Task.Delay(backoff, ct).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested) {
-                        return;
-                    }
-                }
-                else {
-                    // Max attempts reached, report failure
-                    Listener(ResolverResult.ForFailure(
-                        new Grpc.Core.Status(Grpc.Core.StatusCode.Unavailable, "All seeds failed")));
-
-                    // Wait before next round
-                    try {
-                        await Task.Delay(_resilience.MaxBackoff, ct).ConfigureAwait(false);
-                        attempt = 0;
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested) {
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    async Task<bool> TrySubscribeToAnySeedAsync(CancellationToken ct) {
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
-        // Start parallel subscriptions to all seeds
-        var tasks = _seeds
-            .Select(seed => TrySubscribeToSeedAsync(seed, cts.Token))
-            .ToList();
-
-        while (tasks.Count > 0) {
-            var completedTask = await Task.WhenAny(tasks).ConfigureAwait(false);
-            tasks.Remove(completedTask);
+            var seed = _seeds[seedIndex];
+            seedIndex = (seedIndex + 1) % _seeds.Count;
 
             try {
-                var success = await completedTask.ConfigureAwait(false);
-                if (success) {
-                    // One seed succeeded (consumed stream until it ended or failed)
-                    await cts.CancelAsync().ConfigureAwait(false);
-                    return true;
-                }
+                await SubscribeToSeedAsync(seed, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) {
-                throw;
+                return;
             }
-            catch {
-                // This seed failed, continue with others
+            catch (Exception ex) {
+                _logger.TopologyCallFailed(seed, ex);
             }
         }
-
-        return false;
     }
 
-    async Task<bool> TrySubscribeToSeedAsync(DnsEndPoint seed, CancellationToken ct) {
+    async Task SubscribeToSeedAsync(DnsEndPoint seed, CancellationToken ct) {
         _logger.DiscoveringCluster(seed);
 
         var channel = _channelPool.GetChannel(seed);
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(_resilience.Timeout);
-
         var context = new TopologyContext {
             Channel = channel,
-            CancellationToken = timeoutCts.Token,
+            CancellationToken = ct,
             Timeout = _resilience.Timeout,
             Endpoint = seed
         };
 
-        try {
-            var receivedAny = false;
+        var receivedAny = false;
 
-            // Consume ALL topology updates from this seed
-            await foreach (var topology in _topologySource.SubscribeAsync(context, ct).ConfigureAwait(false)) {
-                receivedAny = true;
+        await foreach (var topology in _topologySource.SubscribeAsync(context, ct).ConfigureAwait(false)) {
+            receivedAny = true;
 
-                // Reset timeout on each successful receive
-                timeoutCts.CancelAfter(_resilience.Timeout);
+            if (_isFirst || !TopologyEquals(_lastTopology, topology)) {
+                ValidateTopology(topology);
 
-                if (_isFirst || !TopologyEquals(_lastTopology, topology)) {
-                    ValidateTopology(topology);
-
-                    if (!_isFirst) {
-                        var (added, removed) = ComputeTopologyDiff(_lastTopology, topology);
-                        _logger.TopologyChanged(added, removed);
-                    }
-
-                    _lastTopology = topology;
-                    _isFirst = false;
-
-                    _logger.DiscoveredNodes(topology.Count, topology.EligibleCount);
-                    Listener(ResolverResult.ForResult(BuildAddresses(topology)));
+                if (!_isFirst) {
+                    var (added, removed) = ComputeTopologyDiff(_lastTopology, topology);
+                    _logger.TopologyChanged(added, removed);
                 }
-            }
 
-            return receivedAny;
+                _lastTopology = topology;
+                _isFirst = false;
+
+                _logger.DiscoveredNodes(topology.Count, topology.EligibleCount);
+                Listener(ResolverResult.ForResult(BuildAddresses(topology)));
+            }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) {
-            throw;
-        }
-        catch (Exception ex) {
-            _logger.TopologyCallFailed(seed, ex);
-            throw;
-        }
+
+        if (!receivedAny)
+            _logger.TopologyStreamEmpty(seed);
     }
 
     void ValidateTopology(ClusterTopology<TNode> topology) {
