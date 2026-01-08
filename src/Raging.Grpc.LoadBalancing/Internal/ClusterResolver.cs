@@ -12,7 +12,6 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
     where TNode : struct, IClusterNode {
 
     readonly DiscoveryEngine<TNode> _discoveryEngine;
-    readonly IStreamingTopologySource<TNode> _topologySource;
     readonly TimeSpan _refreshDelay;
     readonly ILogger _logger;
 
@@ -25,27 +24,22 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
     /// </summary>
     public ClusterResolver(
         DiscoveryEngine<TNode> discoveryEngine,
-        IStreamingTopologySource<TNode> topologySource,
         TimeSpan refreshDelay,
         ILogger logger) {
 
         _discoveryEngine = discoveryEngine;
-        _topologySource = topologySource;
         _refreshDelay = refreshDelay;
         _logger = logger;
     }
 
     /// <inheritdoc />
     protected override void OnStarted() {
-        // Start initial resolution
         _refreshCts = new CancellationTokenSource();
         _refreshTask = RefreshLoopAsync(_refreshCts.Token);
     }
 
     /// <inheritdoc />
     public override void Refresh() {
-        // Trigger immediate refresh
-        // Cancel current refresh loop and restart
         _refreshCts?.Cancel();
         _refreshCts?.Dispose();
         _refreshCts = new CancellationTokenSource();
@@ -59,50 +53,43 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
             try {
                 var topology = await _discoveryEngine.DiscoverAsync(ct).ConfigureAwait(false);
 
-                // Check if topology changed
                 if (isFirst || !TopologyEquals(_lastTopology, topology)) {
-                    var added = topology.Count - _lastTopology.Count;
-                    var removed = _lastTopology.Count - topology.Count;
-
                     if (!isFirst) {
-                        _logger.TopologyChanged(Math.Max(0, added), Math.Max(0, -added));
+                        var (added, removed) = ComputeTopologyDiff(_lastTopology, topology);
+                        _logger.TopologyChanged(added, removed);
                     }
 
                     _lastTopology = topology;
-
-                    // Report addresses to load balancer
-                    var addresses = BuildAddresses(topology);
-                    Listener(ResolverResult.ForResult(addresses));
+                    Listener(ResolverResult.ForResult(BuildAddresses(topology)));
                 }
 
                 isFirst = false;
 
-                // Wait for next refresh (streaming sources handle their own timing)
+                // Always wait for refresh delay (polling interval)
+                // For "on-demand" refresh, call Refresh() method
                 if (_refreshDelay > TimeSpan.Zero) {
                     _logger.StartingPeriodicRefresh(_refreshDelay.TotalSeconds);
                     await Task.Delay(_refreshDelay, ct).ConfigureAwait(false);
                 }
                 else {
-                    // No delay means we rely on Refresh() being called
-                    break;
+                    // Zero delay = one-shot mode, wait for Refresh() call
+                    return;
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) {
                 _logger.StoppingRefresh();
-                break;
+                return;
             }
             catch (Exception ex) {
-                // Report error to load balancer
                 Listener(ResolverResult.ForFailure(
                     new Grpc.Core.Status(Grpc.Core.StatusCode.Unavailable, ex.Message, ex)));
 
-                // Wait before retry
                 try {
-                    await Task.Delay(_refreshDelay > TimeSpan.Zero ? _refreshDelay : TimeSpan.FromSeconds(5), ct)
-                        .ConfigureAwait(false);
+                    var retryDelay = _refreshDelay > TimeSpan.Zero ? _refreshDelay : TimeSpan.FromSeconds(5);
+                    await Task.Delay(retryDelay, ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) {
-                    break;
+                    return;
                 }
             }
         }
@@ -122,7 +109,6 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
             addresses.Add(new BalancerAddress(node.EndPoint.Host, node.EndPoint.Port, attributes));
         }
 
-        // Sort by priority using the topology source's comparer
         addresses.Sort((a, b) => {
             var aPriority = a.Attributes.TryGetValue(ClusterPicker.PriorityAttributeKey, out var ap) ? (int)ap! : int.MaxValue;
             var bPriority = b.Attributes.TryGetValue(ClusterPicker.PriorityAttributeKey, out var bp) ? (int)bp! : int.MaxValue;
@@ -136,11 +122,20 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
         if (a.Count != b.Count)
             return false;
 
-        // Simple check - compare endpoints
         var aEndpoints = a.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port, n.IsEligible, n.Priority)).ToHashSet();
         var bEndpoints = b.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port, n.IsEligible, n.Priority)).ToHashSet();
 
         return aEndpoints.SetEquals(bEndpoints);
+    }
+
+    static (int Added, int Removed) ComputeTopologyDiff(ClusterTopology<TNode> old, ClusterTopology<TNode> current) {
+        var oldEndpoints = old.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port)).ToHashSet();
+        var currentEndpoints = current.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port)).ToHashSet();
+
+        var added = currentEndpoints.Count(e => !oldEndpoints.Contains(e));
+        var removed = oldEndpoints.Count(e => !currentEndpoints.Contains(e));
+
+        return (added, removed);
     }
 
     /// <inheritdoc />

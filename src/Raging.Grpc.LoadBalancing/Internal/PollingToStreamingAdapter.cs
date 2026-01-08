@@ -15,8 +15,6 @@ internal sealed class PollingToStreamingAdapter<TNode> : IStreamingTopologySourc
     /// <summary>
     /// Creates a new adapter.
     /// </summary>
-    /// <param name="pollingSource">The polling source to adapt.</param>
-    /// <param name="delay">The delay between polls.</param>
     public PollingToStreamingAdapter(IPollingTopologySource<TNode> pollingSource, TimeSpan delay) {
         _pollingSource = pollingSource;
         _delay = delay;
@@ -27,9 +25,8 @@ internal sealed class PollingToStreamingAdapter<TNode> : IStreamingTopologySourc
         TopologyContext context,
         [EnumeratorCancellation] CancellationToken cancellationToken = default) {
 
-        var ct = CancellationTokenSource
-            .CreateLinkedTokenSource(context.CancellationToken, cancellationToken)
-            .Token;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken, cancellationToken);
+        var ct = cts.Token;
 
         while (!ct.IsCancellationRequested) {
             ClusterTopology<TNode> topology;

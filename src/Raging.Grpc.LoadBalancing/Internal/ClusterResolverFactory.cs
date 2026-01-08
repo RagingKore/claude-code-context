@@ -57,10 +57,6 @@ internal sealed class ClusterResolverFactory<TNode> : ResolverFactory
             _resilience,
             logger);
 
-        return new ClusterResolver<TNode>(
-            discoveryEngine,
-            _topologySource,
-            _refreshDelay,
-            logger);
+        return new ClusterResolver<TNode>(discoveryEngine, _refreshDelay, logger);
     }
 }

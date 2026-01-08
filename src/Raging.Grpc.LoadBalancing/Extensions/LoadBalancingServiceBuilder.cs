@@ -198,23 +198,6 @@ public sealed class LoadBalancingServiceBuilder {
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Configure from LoadBalancingOptions.
-    /// </summary>
-    public LoadBalancingServiceBuilder Configure(Action<LoadBalancingOptions> configure) {
-        var options = new LoadBalancingOptions { Seeds = [] };
-        configure(options);
-
-        if (options.Seeds.Length > 0) {
-            WithSeeds(options.Seeds);
-        }
-
-        _delay = options.Delay;
-        _resilience = options.Resilience;
-
-        return this;
-    }
-
-    /// <summary>
     /// Custom refresh policy.
     /// </summary>
     public LoadBalancingServiceBuilder WithRefreshPolicy(ShouldRefreshTopology policy) {

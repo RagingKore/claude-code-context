@@ -34,11 +34,6 @@ internal static partial class Log {
     public static partial void RefreshTriggered(this ILogger logger, StatusCode statusCode);
 
     [LoggerMessage(
-        Level = LogLevel.Debug,
-        Message = "Picked node {Endpoint} (priority: {Priority}, tier position: {TierPosition})")]
-    public static partial void PickedNode(this ILogger logger, DnsEndPoint endpoint, int priority, int tierPosition);
-
-    [LoggerMessage(
         Level = LogLevel.Information,
         Message = "Topology changed: {AddedCount} added, {RemovedCount} removed")]
     public static partial void TopologyChanged(this ILogger logger, int addedCount, int removedCount);
