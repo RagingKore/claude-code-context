@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Net;
 using Grpc.Net.Client.Balancer;
 using Microsoft.Extensions.Logging;
@@ -11,7 +12,7 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
     where TNode : struct, IClusterNode {
 
     readonly IStreamingTopologySource<TNode> _topologySource;
-    readonly IReadOnlyList<DnsEndPoint> _seeds;
+    readonly ImmutableArray<DnsEndPoint> _seeds;
     readonly SeedChannelPool _channelPool;
     readonly ResilienceOptions _resilience;
     readonly ILogger _logger;
@@ -22,7 +23,7 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
 
     public ClusterResolver(
         IStreamingTopologySource<TNode> topologySource,
-        IReadOnlyList<DnsEndPoint> seeds,
+        ImmutableArray<DnsEndPoint> seeds,
         SeedChannelPool channelPool,
         ResilienceOptions resilience,
         ILogger logger) {

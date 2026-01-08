@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Net;
 using Grpc.Net.Client.Balancer;
 using Microsoft.Extensions.Logging;
@@ -14,14 +15,14 @@ internal sealed class ClusterResolverFactory<TNode> : ResolverFactory
     public const string SchemeName = "cluster";
 
     readonly IStreamingTopologySource<TNode> _topologySource;
-    readonly IReadOnlyList<DnsEndPoint> _seeds;
+    readonly ImmutableArray<DnsEndPoint> _seeds;
     readonly ResilienceOptions _resilience;
     readonly SeedChannelPool _channelPool;
     readonly ILoggerFactory _loggerFactory;
 
     public ClusterResolverFactory(
         IStreamingTopologySource<TNode> topologySource,
-        IReadOnlyList<DnsEndPoint> seeds,
+        ImmutableArray<DnsEndPoint> seeds,
         ResilienceOptions resilience,
         SeedChannelPool channelPool,
         ILoggerFactory? loggerFactory) {

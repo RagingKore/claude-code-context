@@ -7,6 +7,8 @@ namespace Raging.Grpc.LoadBalancing.Internal;
 /// Custom load balancer that manages subchannels and creates priority-aware pickers.
 /// </summary>
 internal sealed class ClusterLoadBalancer : LoadBalancer {
+    static readonly BalancerState FailureState = new(ConnectivityState.TransientFailure, new ClusterPicker([]));
+
     readonly IChannelControlHelper _controller;
     readonly ILogger _logger;
 
@@ -30,18 +32,8 @@ internal sealed class ClusterLoadBalancer : LoadBalancer {
         if (_disposed)
             return;
 
-        if (state.Status.StatusCode != Grpc.Core.StatusCode.OK) {
-            // Resolver reported an error
-            _controller.UpdateState(new BalancerState(
-                ConnectivityState.TransientFailure,
-                new ClusterPicker([])));
-            return;
-        }
-
-        if (state.Addresses is null || state.Addresses.Count == 0) {
-            _controller.UpdateState(new BalancerState(
-                ConnectivityState.TransientFailure,
-                new ClusterPicker([])));
+        if (state.Status.StatusCode != Grpc.Core.StatusCode.OK || state.Addresses is null or { Count: 0 }) {
+            _controller.UpdateState(FailureState);
             return;
         }
 

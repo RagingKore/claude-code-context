@@ -213,7 +213,7 @@ public sealed class LoadBalancingBuilder {
         // Create resolver factory
         var resolverFactory = new ClusterResolverFactory<TNode>(
             streamingSource,
-            seeds,
+            [.. seeds],
             _resilience,
             seedChannelPool,
             loggerFactory);

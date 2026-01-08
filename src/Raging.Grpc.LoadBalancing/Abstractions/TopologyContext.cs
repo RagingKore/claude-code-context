@@ -6,7 +6,7 @@ namespace Raging.Grpc.LoadBalancing;
 /// <summary>
 /// Context provided to topology source operations.
 /// </summary>
-public sealed class TopologyContext {
+public sealed record TopologyContext {
     /// <summary>
     /// Channel connected to a cluster node.
     /// </summary>

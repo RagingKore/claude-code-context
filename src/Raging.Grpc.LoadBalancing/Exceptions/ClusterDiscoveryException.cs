@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Net;
 
 namespace Raging.Grpc.LoadBalancing;
@@ -14,12 +15,12 @@ public sealed class ClusterDiscoveryException : LoadBalancingException {
     /// <summary>
     /// The endpoints that were tried.
     /// </summary>
-    public IReadOnlyList<DnsEndPoint> TriedEndpoints { get; }
+    public ImmutableArray<DnsEndPoint> TriedEndpoints { get; }
 
     /// <summary>
     /// The exceptions that occurred during discovery attempts.
     /// </summary>
-    public IReadOnlyList<Exception> Exceptions { get; }
+    public ImmutableArray<Exception> Exceptions { get; }
 
     /// <summary>
     /// Initializes a new instance of the <see cref="ClusterDiscoveryException"/> class.
@@ -29,9 +30,9 @@ public sealed class ClusterDiscoveryException : LoadBalancingException {
     /// <param name="exceptions">The exceptions that occurred.</param>
     public ClusterDiscoveryException(
         int attempts,
-        IReadOnlyList<DnsEndPoint> triedEndpoints,
-        IReadOnlyList<Exception> exceptions)
-        : base($"Failed to discover cluster after {attempts} attempts across {triedEndpoints.Count} endpoints.") {
+        ImmutableArray<DnsEndPoint> triedEndpoints,
+        ImmutableArray<Exception> exceptions)
+        : base($"Failed to discover cluster after {attempts} attempts across {triedEndpoints.Length} endpoints.") {
         Attempts = attempts;
         TriedEndpoints = triedEndpoints;
         Exceptions = exceptions;
