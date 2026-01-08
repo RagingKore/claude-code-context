@@ -103,11 +103,11 @@ internal sealed class ClusterLoadBalancer : LoadBalancer {
     }
 
     void UpdatePicker() {
-        // Get ready subchannels sorted by priority
-        var ready = _subchannels
-            .Where(s => s.State == ConnectivityState.Ready)
-            .OrderBy(GetPriority)
-            .ToList();
+        // Get ready subchannels - order preserved from Resolver
+        var ready = new List<Subchannel>();
+        foreach (var s in _subchannels)
+            if (s.State == ConnectivityState.Ready)
+                ready.Add(s);
 
         var connectivityState = ready.Count > 0
             ? ConnectivityState.Ready
