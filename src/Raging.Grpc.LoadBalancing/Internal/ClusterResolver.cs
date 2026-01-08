@@ -19,7 +19,6 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
     CancellationTokenSource? _cts;
     Task? _subscriptionTask;
     ClusterTopology<TNode> _lastTopology;
-    bool _isFirst = true;
 
     public ClusterResolver(
         IStreamingTopologySource<TNode> topologySource,
@@ -83,16 +82,15 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
         await foreach (var topology in _topologySource.SubscribeAsync(context, ct).ConfigureAwait(false)) {
             receivedAny = true;
 
-            if (_isFirst || !TopologyEquals(_lastTopology, topology)) {
+            if (_lastTopology != topology) {
                 ValidateTopology(topology);
 
-                if (!_isFirst) {
-                    var (added, removed) = ComputeTopologyDiff(_lastTopology, topology);
+                if (_lastTopology != default) {
+                    var (added, removed) = _lastTopology.ComputeDiff(topology);
                     _logger.TopologyChanged(added, removed);
                 }
 
                 _lastTopology = topology;
-                _isFirst = false;
 
                 _logger.DiscoveredNodes(topology.Count, topology.EligibleCount);
                 Listener(ResolverResult.ForResult(BuildAddresses(topology)));
@@ -134,26 +132,6 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
         });
 
         return addresses;
-    }
-
-    static bool TopologyEquals(ClusterTopology<TNode> a, ClusterTopology<TNode> b) {
-        if (a.Count != b.Count)
-            return false;
-
-        var aEndpoints = a.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port, n.IsEligible, n.Priority)).ToHashSet();
-        var bEndpoints = b.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port, n.IsEligible, n.Priority)).ToHashSet();
-
-        return aEndpoints.SetEquals(bEndpoints);
-    }
-
-    static (int Added, int Removed) ComputeTopologyDiff(ClusterTopology<TNode> old, ClusterTopology<TNode> current) {
-        var oldEndpoints = old.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port)).ToHashSet();
-        var currentEndpoints = current.Nodes.Select(n => (n.EndPoint.Host, n.EndPoint.Port)).ToHashSet();
-
-        return (
-            currentEndpoints.Count(e => !oldEndpoints.Contains(e)),
-            oldEndpoints.Count(e => !currentEndpoints.Contains(e))
-        );
     }
 
     protected override void Dispose(bool disposing) {
