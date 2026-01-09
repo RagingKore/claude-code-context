@@ -113,13 +113,21 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
     }
 
     IReadOnlyList<BalancerAddress> BuildAddresses(ClusterTopology<TNode> topology) {
-        var addresses = new List<BalancerAddress>();
-        foreach (var node in topology.Nodes) {
-            if (!node.IsEligible)
-                continue;
+        // Filter eligible nodes
+        var eligible = new List<TNode>();
+        foreach (var node in topology.Nodes)
+            if (node.IsEligible)
+                eligible.Add(node);
 
+        // Sort using topology source comparer - THIS IS THE PICKING ALGORITHM
+        eligible.Sort(_topologySource);
+
+        // Convert to addresses with order index from comparer
+        var addresses = new List<BalancerAddress>(eligible.Count);
+        for (var i = 0; i < eligible.Count; i++) {
+            var node = eligible[i];
             var attributes = new BalancerAttributes {
-                { ClusterPicker.PriorityAttributeKey, node.Priority }
+                { ClusterPicker.OrderIndexKey, i }
             };
             addresses.Add(new BalancerAddress(node.EndPoint.Host, node.EndPoint.Port, attributes));
         }

@@ -8,20 +8,19 @@ namespace Raging.Grpc.LoadBalancing.Internal;
 /// </summary>
 internal sealed class ClusterPicker : SubchannelPicker {
     /// <summary>
-    /// Attribute key for storing node priority on subchannels.
+    /// Attribute key for storing order index (from topology source comparer).
     /// </summary>
-    public const string PriorityAttributeKey = "cluster-node-priority";
+    public const string OrderIndexKey = "cluster-node-order";
 
     static readonly Status NoReadyNodesStatus =
         new(StatusCode.Unavailable, "No ready nodes available in cluster.");
 
     readonly Subchannel[] _readySubchannels;
-    readonly int _topTierCount;
     int _roundRobinIndex;
 
     /// <summary>
     /// Creates a new picker with the specified subchannels.
-    /// Filters to Ready subchannels and sorts by priority.
+    /// Filters to Ready subchannels and sorts by order index (from topology source comparer).
     /// </summary>
     /// <param name="subchannels">All subchannels from the load balancer.</param>
     public ClusterPicker(IReadOnlyList<Subchannel> subchannels) {
@@ -33,15 +32,13 @@ internal sealed class ClusterPicker : SubchannelPicker {
 
         if (ready.Count == 0) {
             _readySubchannels = [];
-            _topTierCount = 0;
             return;
         }
 
-        // Sort by priority
-        ready.Sort((a, b) => GetPriority(a).CompareTo(GetPriority(b)));
+        // Sort by order index (assigned by Resolver using topology source comparer)
+        ready.Sort((a, b) => GetOrderIndex(a).CompareTo(GetOrderIndex(b)));
 
         _readySubchannels = [.. ready];
-        _topTierCount = CountTopTier(_readySubchannels);
     }
 
     /// <summary>
@@ -54,34 +51,17 @@ internal sealed class ClusterPicker : SubchannelPicker {
         if (_readySubchannels.Length == 0)
             return PickResult.ForFailure(NoReadyNodesStatus);
 
-        // Atomic increment and round-robin within top tier
+        // Round-robin across all ready subchannels (ordered by topology source comparer)
         var index = Interlocked.Increment(ref _roundRobinIndex);
-
-        // Handle potential overflow and ensure positive index within top tier
-        var selectedIndex = ((index % _topTierCount) + _topTierCount) % _topTierCount;
+        var count = _readySubchannels.Length;
+        var selectedIndex = ((index % count) + count) % count;
 
         return PickResult.ForSubchannel(_readySubchannels[selectedIndex]);
     }
 
-    static int CountTopTier(Subchannel[] sorted) {
-        if (sorted.Length == 0)
-            return 0;
-
-        var topPriority = GetPriority(sorted[0]);
-        var count = 1;
-
-        for (var i = 1; i < sorted.Length; i++) {
-            if (GetPriority(sorted[i]) != topPriority)
-                break;
-            count++;
-        }
-
-        return count;
-    }
-
-    static int GetPriority(Subchannel subchannel) {
-        if (subchannel.Attributes.TryGetValue(PriorityAttributeKey, out var value) && value is int priority)
-            return priority;
+    static int GetOrderIndex(Subchannel subchannel) {
+        if (subchannel.Attributes.TryGetValue(OrderIndexKey, out var value) && value is int order)
+            return order;
 
         return int.MaxValue;
     }
