@@ -2,9 +2,9 @@
 
 ## Raging.Grpc.LoadBalancing
 
-**Version:** 1.0.0-alpha
+**Version:** 1.0.0
 **Status:** Draft
-**Last Updated:** 2026-01-08
+**Last Updated:** 2026-01-09
 
 ---
 
@@ -12,17 +12,16 @@
 
 1. [Overview](#1-overview)
 2. [Goals & Non-Goals](#2-goals--non-goals)
-3. [Public API](#3-public-api)
-4. [Contracts & Interfaces](#4-contracts--interfaces)
-5. [Configuration](#5-configuration)
-6. [Builders](#6-builders)
-7. [Internal Architecture](#7-internal-architecture)
-8. [Sequence Diagrams](#8-sequence-diagrams)
+3. [Architecture](#3-architecture)
+4. [Component Design & Responsibilities](#4-component-design--responsibilities)
+5. [Contracts & Interfaces](#5-contracts--interfaces)
+6. [Configuration](#6-configuration)
+7. [Sequence Diagrams](#7-sequence-diagrams)
+8. [Design Decisions & Rationale](#8-design-decisions--rationale)
 9. [Error Handling](#9-error-handling)
-10. [File Structure](#10-file-structure)
-11. [Edge Cases & Behaviors](#11-edge-cases--behaviors)
-12. [Performance Considerations](#12-performance-considerations)
-13. [Implementation Notes](#13-implementation-notes)
+10. [Performance Considerations](#10-performance-considerations)
+11. [File Structure](#11-file-structure)
+12. [Examples](#12-examples)
 
 ---
 
@@ -33,9 +32,10 @@ A generic, high-performance gRPC load balancer for .NET 8/9/10 that enables clus
 ### Core Principle
 
 User implements **one interface** (`IPollingTopologySource<TNode>` or `IStreamingTopologySource<TNode>`), the library handles everything else:
-- Topology discovery with retry and backoff
-- Node selection based on priority
-- Subchannel management
+
+- Topology discovery from seed nodes
+- Node selection based on custom comparer (default: by Priority)
+- Subchannel (connection) management
 - Automatic refresh on failures
 - Integration with gRPC's native load balancing infrastructure
 
@@ -45,7 +45,8 @@ User implements **one interface** (`IPollingTopologySource<TNode>` or `IStreamin
 - **Zero-Allocation Hot Path**: `Pick()` method allocates nothing
 - **Flexible Configuration**: POCO options for JSON serialization + fluent builder
 - **DI Support**: Full integration with `IServiceCollection`
-- **Extensible**: Custom comparison logic via interface implementation
+- **Extensible**: Custom node selection order via `IComparer<TNode>` on topology source
+- **Separation of Concerns**: Each component has a single, well-defined responsibility
 
 ---
 
@@ -59,8 +60,9 @@ User implements **one interface** (`IPollingTopologySource<TNode>` or `IStreamin
 | **Performance** | Zero allocations on pick hot path |
 | **Flexibility** | Support polling and streaming topology sources |
 | **Integration** | Seamless integration with standard `GrpcChannel` patterns |
-| **Resilience** | Automatic retry, backoff, and failure handling |
+| **Resilience** | Automatic retry with seed failover |
 | **Observability** | Source-generated logging |
+| **Separation of Concerns** | Each component does one thing well |
 
 ### Non-Goals (MVP)
 
@@ -68,124 +70,237 @@ User implements **one interface** (`IPollingTopologySource<TNode>` or `IStreamin
 |----------|--------|
 | IPv6 bracket notation | Complexity, defer to future |
 | DNS SRV discovery | Defer to future |
-| Per-call node preference | Simplicity; user controls via Priority |
-| Weighted load balancing | Priority tiers + round-robin sufficient |
+| Weighted load balancing | Use Priority + custom comparer |
 | Health checking | Rely on topology source for health info |
 
 ---
 
-## 3. Public API
+## 3. Architecture
 
-### Entry Points
+### gRPC Load Balancing Concepts
 
-```csharp
-namespace Raging.Grpc.LoadBalancing;
+In .NET gRPC, client-side load balancing consists of three components:
 
-public static class GrpcLoadBalancedChannel {
+| Component | Responsibility |
+|-----------|----------------|
+| **Resolver** | Discovers server addresses (e.g., via DNS, service discovery) |
+| **LoadBalancer** | Manages connections (subchannels) to those addresses |
+| **SubchannelPicker** | Picks which connection to use for each RPC call |
 
-    /// <summary>
-    /// Create a load-balanced channel for the specified address.
-    /// </summary>
-    public static GrpcChannel ForAddress(
-        string address,
-        Action<LoadBalancingBuilder> configure);
-
-    /// <summary>
-    /// Create a load-balanced channel from configuration.
-    /// </summary>
-    public static GrpcChannel FromConfiguration(
-        IConfiguration configuration,
-        Action<LoadBalancingBuilder> configure);
-}
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         GrpcChannel                             │
+│                                                                 │
+│  ┌─────────────┐    ┌────────────────┐    ┌─────────────────┐  │
+│  │   Resolver  │───▶│  LoadBalancer  │───▶│     Picker      │  │
+│  │             │    │                │    │                 │  │
+│  │ "Here are   │    │ "I manage      │    │ "Use THIS one   │  │
+│  │  the        │    │  connections   │    │  for THIS       │  │
+│  │  servers"   │    │  to them"      │    │  request"       │  │
+│  └─────────────┘    └────────────────┘    └─────────────────┘  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Usage Examples
+### High-Level Architecture
 
-#### Non-DI: Simple
-
-```csharp
-using var channel = GrpcLoadBalancedChannel.ForAddress("node1:2113", lb => lb
-    .WithSeeds("node2:2113", "node3:2113")
-    .WithPollingTopologySource(new KurrentTopologySource(), delay: TimeSpan.FromSeconds(30))
-);
-
-var client = new Streams.StreamsClient(channel);
-await client.AppendAsync(request);
 ```
-
-#### Non-DI: Full Configuration
-
-```csharp
-using var channel = GrpcLoadBalancedChannel.ForAddress("node1:2113", lb => lb
-    .WithSeeds("node2:2113", "node3:2113")
-    .WithResilience(r => {
-        r.Timeout = TimeSpan.FromSeconds(3);
-        r.MaxDiscoveryAttempts = 5;
-        r.InitialBackoff = TimeSpan.FromMilliseconds(50);
-        r.MaxBackoff = TimeSpan.FromSeconds(2);
-    })
-    .WithPollingTopologySource(new KurrentTopologySource(), delay: TimeSpan.FromSeconds(15))
-    .WithRefreshPolicy(RefreshPolicy.Default)
-    .WithLoggerFactory(loggerFactory)
-    .ConfigureChannel(opts => {
-        opts.Credentials = ChannelCredentials.SecureSsl;
-        opts.MaxReceiveMessageSize = 16 * 1024 * 1024;
-    })
-);
-```
-
-#### Non-DI: From Configuration
-
-```csharp
-using var channel = GrpcLoadBalancedChannel.FromConfiguration(
-    configuration.GetSection("LoadBalancing"),
-    lb => lb.WithPollingTopologySource(new KurrentTopologySource())
-);
-```
-
-#### DI: Type Resolution
-
-```csharp
-services.AddGrpcLoadBalancing("node1:2113")
-    .WithSeeds("node2:2113", "node3:2113")
-    .WithPollingTopologySource<KurrentNode, KurrentTopologySource>(delay: TimeSpan.FromSeconds(30))
-    .ConfigureChannel(opts => opts.Credentials = ChannelCredentials.SecureSsl)
-    .Build();
-
-// Inject
-public class MyService(GrpcChannel channel) {
-    readonly Streams.StreamsClient _client = new(channel);
-}
-```
-
-#### DI: Instance
-
-```csharp
-services.AddGrpcLoadBalancing("node1:2113")
-    .WithSeeds("node2:2113", "node3:2113")
-    .WithPollingTopologySource<KurrentNode>(new KurrentTopologySource())
-    .Build();
-```
-
-#### DI: Factory
-
-```csharp
-services.AddGrpcLoadBalancing("node1:2113")
-    .WithSeeds("node2:2113", "node3:2113")
-    .WithPollingTopologySource<KurrentNode>(sp =>
-        new KurrentTopologySource(sp.GetRequiredService<ILogger<KurrentTopologySource>>()))
-    .Build();
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              User Code                                        │
+│                                                                               │
+│  var channel = GrpcLoadBalancedChannel.ForAddress("node1:2113", lb => lb     │
+│      .WithSeeds("node2:2113", "node3:2113")                                  │
+│      .WithPollingTopologySource(new MyTopologySource()));                    │
+│                                                                               │
+│  var client = new MyService.MyServiceClient(channel);                        │
+│  await client.DoSomethingAsync(request);  // ← Uses load balancing           │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         Library Components                                    │
+│                                                                               │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                    Topology Source (User Implements)                    │  │
+│  │                                                                         │  │
+│  │  • IPollingTopologySource<TNode> - request/response discovery          │  │
+│  │  • IStreamingTopologySource<TNode> - server-push discovery             │  │
+│  │  • IComparer<TNode> - node selection order (THE PICKING ALGORITHM)     │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                    │                                          │
+│                                    ▼                                          │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                         ClusterResolver                                 │  │
+│  │                                                                         │  │
+│  │  • Subscribes to topology source                                       │  │
+│  │  • Iterates through seeds sequentially on failure                      │  │
+│  │  • Sorts nodes using topology source's IComparer<TNode>                │  │
+│  │  • Assigns order index to preserve comparer's sort order               │  │
+│  │  • Passes addresses to LoadBalancer                                    │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                    │                                          │
+│                                    ▼                                          │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                       ClusterLoadBalancer                               │  │
+│  │                                                                         │  │
+│  │  • Creates/destroys subchannels (TCP connections)                      │  │
+│  │  • Monitors subchannel health (Ready, Connecting, Idle, Failure)       │  │
+│  │  • Passes ALL subchannels to Picker (no filtering, no sorting)         │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                    │                                          │
+│                                    ▼                                          │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │                         ClusterPicker                                   │  │
+│  │                                                                         │  │
+│  │  • Filters to Ready subchannels only                                   │  │
+│  │  • Sorts by order index (preserving topology source comparer order)    │  │
+│  │  • Round-robins across sorted Ready subchannels                        │  │
+│  │  • ZERO ALLOCATION on Pick() - called on every gRPC call               │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 4. Contracts & Interfaces
+## 4. Component Design & Responsibilities
+
+### Separation of Concerns
+
+Each component has a single, well-defined responsibility:
+
+| Component | Single Responsibility | Does NOT Do |
+|-----------|----------------------|-------------|
+| **TopologySource** | Discovers nodes, defines sort order | Connection management, picking |
+| **Resolver** | Converts topology → addresses | Connection management, sorting (delegates to source) |
+| **LoadBalancer** | Manages connections (subchannels) | Filtering, sorting, picking |
+| **Picker** | Selects connection for each request | Discovery, connection management |
+
+### Component Details
+
+#### 1. IPollingTopologySource / IStreamingTopologySource
+
+**Responsibility:** Discover cluster topology and define node selection order.
+
+```csharp
+public interface IStreamingTopologySource<TNode> : IComparer<TNode>
+    where TNode : struct, IClusterNode {
+
+    // Discover topology
+    IAsyncEnumerable<ClusterTopology<TNode>> SubscribeAsync(
+        TopologyContext context,
+        CancellationToken cancellationToken = default);
+
+    // Define selection order (THE PICKING ALGORITHM)
+    // Default: sort by Priority ascending
+    int IComparer<TNode>.Compare(TNode x, TNode y) => x.Priority.CompareTo(y.Priority);
+}
+```
+
+**Key Points:**
+- User implements this interface
+- `SubscribeAsync` yields topology snapshots (streaming) or single snapshot (polling via adapter)
+- `IComparer<TNode>` determines node selection order - **this IS the picking algorithm**
+- Default comparer sorts by `Priority` ascending (lower = preferred)
+
+#### 2. PollingToStreamingAdapter
+
+**Responsibility:** Convert polling source to streaming interface.
+
+```csharp
+internal sealed class PollingToStreamingAdapter<TNode> : IStreamingTopologySource<TNode>
+```
+
+**Key Points:**
+- Wraps `IPollingTopologySource<TNode>`
+- Polls at configured interval, yields each result
+- Internal architecture is always streaming-based
+
+#### 3. ClusterResolver
+
+**Responsibility:** Subscribe to topology, convert nodes to addresses with order index.
+
+```csharp
+internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
+```
+
+**Key Points:**
+- Iterates through seeds sequentially (round-robin on failure)
+- Stays connected to streaming source "forever" until it ends
+- On topology update:
+  1. Filters to eligible nodes
+  2. Sorts using `_topologySource` (IComparer<TNode>)
+  3. Assigns sequential order index (0, 1, 2...)
+  4. Passes `BalancerAddress` list to LoadBalancer
+- **Does NOT manage connections**
+
+#### 4. ClusterLoadBalancer
+
+**Responsibility:** Manage subchannels (connections) to addresses.
+
+```csharp
+internal sealed class ClusterLoadBalancer : LoadBalancer
+```
+
+**Key Points:**
+- Creates/destroys `Subchannel` objects for each address
+- Monitors subchannel state changes
+- On state change: creates new `ClusterPicker` with **ALL** subchannels
+- **Does NOT filter or sort** - passes everything to Picker
+- **Does NOT pick** - that's the Picker's job
+
+#### 5. ClusterPicker
+
+**Responsibility:** Select which subchannel to use for each gRPC call.
+
+```csharp
+internal sealed class ClusterPicker : SubchannelPicker
+```
+
+**Key Points:**
+- Called on **every single gRPC call** (hot path)
+- At construction:
+  1. Filters to Ready subchannels only
+  2. Sorts by order index (preserves topology source comparer order)
+- At `Pick()`:
+  1. Atomic increment of round-robin index
+  2. Return `_readySubchannels[index % count]`
+  3. **ZERO ALLOCATIONS**
+
+#### 6. SeedChannelPool
+
+**Responsibility:** Manage reusable gRPC channels to seed nodes.
+
+```csharp
+internal sealed class SeedChannelPool : IAsyncDisposable
+```
+
+**Key Points:**
+- Creates channels lazily
+- Reuses channels across discovery attempts
+- Disposes all channels on shutdown
+
+#### 7. ClusterTopology
+
+**Responsibility:** Immutable snapshot of cluster nodes with cached computations.
+
+```csharp
+public readonly record struct ClusterTopology<TNode>(ImmutableArray<TNode> Nodes)
+```
+
+**Key Points:**
+- Uses `ImmutableArray<TNode>` for value semantics
+- Caches hash code and eligible count at construction
+- Value equality based on node content (not reference)
+- `ComputeDiff()` method for change detection
+
+---
+
+## 5. Contracts & Interfaces
 
 ### IClusterNode
 
 ```csharp
-namespace Raging.Grpc.LoadBalancing;
-
 /// <summary>
 /// Represents a node in the cluster.
 /// </summary>
@@ -197,12 +312,13 @@ public interface IClusterNode {
 
     /// <summary>
     /// Whether this node can accept connections.
+    /// Nodes with IsEligible=false are excluded from load balancing.
     /// </summary>
     bool IsEligible { get; }
 
     /// <summary>
-    /// Selection priority. Lower values are preferred.
-    /// Nodes with equal priority are load-balanced via round-robin.
+    /// Selection priority. Used by default comparer.
+    /// Lower values are preferred.
     /// </summary>
     int Priority { get; }
 }
@@ -212,15 +328,23 @@ public interface IClusterNode {
 
 ```csharp
 /// <summary>
-/// A snapshot of the cluster topology.
+/// Immutable snapshot of cluster topology with cached computations.
 /// </summary>
 public readonly record struct ClusterTopology<TNode>(
-    IReadOnlyList<TNode> Nodes
+    ImmutableArray<TNode> Nodes
 ) where TNode : struct, IClusterNode {
 
-    public static ClusterTopology<TNode> Empty => new([]);
+    public static ClusterTopology<TNode> Empty => new(ImmutableArray<TNode>.Empty);
+    public bool IsEmpty => Nodes.IsDefaultOrEmpty;
+    public int Count => Nodes.IsDefaultOrEmpty ? 0 : Nodes.Length;
+    public int EligibleCount { get; }  // Cached at construction
 
-    public bool IsEmpty => Nodes.Count == 0;
+    // Value equality based on node content
+    public bool Equals(ClusterTopology<TNode> other);
+    public override int GetHashCode();  // Cached at construction
+
+    // Change detection
+    public (int Added, int Removed) ComputeDiff(ClusterTopology<TNode> other);
 }
 ```
 
@@ -230,9 +354,9 @@ public readonly record struct ClusterTopology<TNode>(
 /// <summary>
 /// Context provided to topology source operations.
 /// </summary>
-public sealed class TopologyContext {
+public sealed record TopologyContext {
     /// <summary>
-    /// Channel connected to a cluster node.
+    /// Channel connected to a cluster seed node.
     /// </summary>
     public required ChannelBase Channel { get; init; }
 
@@ -269,8 +393,9 @@ public interface IPollingTopologySource<TNode> : IComparer<TNode>
     ValueTask<ClusterTopology<TNode>> GetClusterAsync(TopologyContext context);
 
     /// <summary>
-    /// Default comparison: sort by Priority ascending.
-    /// Override to customize node selection order.
+    /// Node comparison for selection order. THE PICKING ALGORITHM.
+    /// Default: sort by Priority ascending (lower = preferred).
+    /// Override to customize (e.g., prefer same datacenter, least latency).
     /// </summary>
     int IComparer<TNode>.Compare(TNode x, TNode y) => x.Priority.CompareTo(y.Priority);
 }
@@ -288,95 +413,28 @@ public interface IStreamingTopologySource<TNode> : IComparer<TNode>
     /// <summary>
     /// Subscribe to cluster topology changes.
     /// Each yielded value is the complete current topology (snapshot model).
+    /// The enumerable should yield continuously until cancelled.
     /// </summary>
-    IAsyncEnumerable<ClusterTopology<TNode>> SubscribeAsync(TopologyContext context);
+    IAsyncEnumerable<ClusterTopology<TNode>> SubscribeAsync(
+        TopologyContext context,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Default comparison: sort by Priority ascending.
-    /// Override to customize node selection order.
+    /// Node comparison for selection order. THE PICKING ALGORITHM.
+    /// Default: sort by Priority ascending (lower = preferred).
+    /// Override to customize (e.g., prefer same datacenter, least latency).
     /// </summary>
     int IComparer<TNode>.Compare(TNode x, TNode y) => x.Priority.CompareTo(y.Priority);
 }
 ```
 
-### Example User Implementation
-
-```csharp
-// Node definition
-public readonly record struct KurrentNode(
-    DnsEndPoint EndPoint,
-    bool IsEligible,
-    int Priority,
-    VNodeState State,
-    string Datacenter
-) : IClusterNode;
-
-// Simple implementation - uses default comparison (by Priority)
-public sealed class KurrentTopologySource : IPollingTopologySource<KurrentNode> {
-
-    public async ValueTask<ClusterTopology<KurrentNode>> GetClusterAsync(TopologyContext context) {
-        var client = new Gossip.GossipClient(context.Channel);
-
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(context.CancellationToken);
-        cts.CancelAfter(context.Timeout);
-
-        var response = await client.ReadAsync(new Empty(), cancellationToken: cts.Token)
-            .ConfigureAwait(false);
-
-        var nodes = response.Members
-            .Select(m => new KurrentNode(
-                EndPoint: new DnsEndPoint(m.HttpEndPoint.Address, (int)m.HttpEndPoint.Port),
-                IsEligible: m.IsAlive && IsConnectable(m.State),
-                Priority: GetPriority(m.State),
-                State: m.State,
-                Datacenter: m.Datacenter))
-            .ToArray();
-
-        return new ClusterTopology<KurrentNode>(nodes);
-    }
-
-    static bool IsConnectable(VNodeState state) => state is
-        VNodeState.Leader or VNodeState.Follower or VNodeState.ReadOnlyReplica;
-
-    static int GetPriority(VNodeState state) => state switch {
-        VNodeState.Leader => 0,
-        VNodeState.Follower => 1,
-        VNodeState.ReadOnlyReplica => 2,
-        _ => int.MaxValue
-    };
-}
-
-// Custom comparison - prefer same datacenter
-public sealed class DatacenterAwareTopologySource : IPollingTopologySource<KurrentNode> {
-    readonly string _preferredDc;
-
-    public DatacenterAwareTopologySource(string preferredDc) => _preferredDc = preferredDc;
-
-    public async ValueTask<ClusterTopology<KurrentNode>> GetClusterAsync(TopologyContext context) {
-        // ... same as above
-    }
-
-    // Override comparison: prefer same datacenter, then by priority
-    public int Compare(KurrentNode x, KurrentNode y) {
-        var xLocal = x.Datacenter == _preferredDc ? 0 : 1;
-        var yLocal = y.Datacenter == _preferredDc ? 0 : 1;
-
-        var dcCompare = xLocal.CompareTo(yLocal);
-        return dcCompare != 0 ? dcCompare : x.Priority.CompareTo(y.Priority);
-    }
-}
-```
-
 ---
 
-## 5. Configuration
+## 6. Configuration
 
 ### LoadBalancingOptions (POCO)
 
 ```csharp
-/// <summary>
-/// Load balancing configuration. JSON-serializable.
-/// </summary>
 public sealed class LoadBalancingOptions {
     /// <summary>
     /// Seed endpoints for discovery. Format: "host:port"
@@ -389,14 +447,11 @@ public sealed class LoadBalancingOptions {
     public TimeSpan Delay { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Resilience and failure handling.
+    /// Resilience configuration.
     /// </summary>
     public ResilienceOptions Resilience { get; set; } = new();
 }
 
-/// <summary>
-/// Resilience configuration.
-/// </summary>
 public sealed class ResilienceOptions {
     /// <summary>
     /// Timeout for individual topology calls.
@@ -404,28 +459,13 @@ public sealed class ResilienceOptions {
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// Maximum discovery attempts before failing.
-    /// </summary>
-    public int MaxDiscoveryAttempts { get; set; } = 10;
-
-    /// <summary>
-    /// Initial backoff after all seeds fail.
-    /// </summary>
-    public TimeSpan InitialBackoff { get; set; } = TimeSpan.FromMilliseconds(100);
-
-    /// <summary>
-    /// Maximum backoff duration.
-    /// </summary>
-    public TimeSpan MaxBackoff { get; set; } = TimeSpan.FromSeconds(5);
-
-    /// <summary>
     /// gRPC status codes that trigger topology refresh.
     /// </summary>
-    public int[] RefreshOnStatusCodes { get; set; } = [14]; // StatusCode.Unavailable
+    public int[] RefreshOnStatusCodes { get; set; } = [14]; // Unavailable
 }
 ```
 
-### JSON Configuration Example
+### JSON Configuration
 
 ```json
 {
@@ -434,437 +474,94 @@ public sealed class ResilienceOptions {
     "Delay": "00:00:30",
     "Resilience": {
       "Timeout": "00:00:05",
-      "MaxDiscoveryAttempts": 10,
-      "InitialBackoff": "00:00:00.100",
-      "MaxBackoff": "00:00:05",
       "RefreshOnStatusCodes": [14]
     }
   }
 }
 ```
 
----
-
-## 6. Builders
-
-### LoadBalancingBuilder (Non-DI)
+### Fluent Builder (Non-DI)
 
 ```csharp
-public sealed class LoadBalancingBuilder {
-    readonly List<DnsEndPoint> _seeds = [];
-    ResilienceOptions _resilience = new();
-
-    object? _topologySource;
-    Type? _nodeType;
-    bool _isStreaming;
-    TimeSpan? _delay;
-
-    ShouldRefreshTopology? _refreshPolicy;
-    ILoggerFactory? _loggerFactory;
-    GrpcChannelOptions? _channelOptions;
-
-    // ═══════════════════════════════════════════════════════════════
-    // SEEDS
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Add seeds as strings. Format: "host:port"
-    /// </summary>
-    public LoadBalancingBuilder WithSeeds(params string[] endpoints);
-
-    /// <summary>
-    /// Add seeds as DnsEndPoints.
-    /// </summary>
-    public LoadBalancingBuilder WithSeeds(params DnsEndPoint[] endpoints);
-
-    /// <summary>
-    /// Add seeds from enumerable.
-    /// </summary>
-    public LoadBalancingBuilder WithSeeds(IEnumerable<DnsEndPoint> endpoints);
-
-    // ═══════════════════════════════════════════════════════════════
-    // RESILIENCE
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Configure resilience options.
-    /// </summary>
-    public LoadBalancingBuilder WithResilience(Action<ResilienceOptions> configure);
-
-    // ═══════════════════════════════════════════════════════════════
-    // TOPOLOGY SOURCE
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Use a polling topology source.
-    /// </summary>
-    /// <param name="source">The topology source instance.</param>
-    /// <param name="delay">Delay between polls. Default: 30 seconds.</param>
-    public LoadBalancingBuilder WithPollingTopologySource<TNode>(
-        IPollingTopologySource<TNode> source,
-        TimeSpan? delay = null)
-        where TNode : struct, IClusterNode;
-
-    /// <summary>
-    /// Use a streaming topology source.
-    /// </summary>
-    public LoadBalancingBuilder WithStreamingTopologySource<TNode>(
-        IStreamingTopologySource<TNode> source)
-        where TNode : struct, IClusterNode;
-
-    // ═══════════════════════════════════════════════════════════════
-    // REFRESH POLICY
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Custom policy for triggering topology refresh on errors.
-    /// </summary>
-    public LoadBalancingBuilder WithRefreshPolicy(ShouldRefreshTopology policy);
-
-    // ═══════════════════════════════════════════════════════════════
-    // LOGGING
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Configure logging.
-    /// </summary>
-    public LoadBalancingBuilder WithLoggerFactory(ILoggerFactory loggerFactory);
-
-    // ═══════════════════════════════════════════════════════════════
-    // CHANNEL OPTIONS
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Configure the underlying GrpcChannel.
-    /// </summary>
-    public LoadBalancingBuilder ConfigureChannel(Action<GrpcChannelOptions> configure);
-
-    // ═══════════════════════════════════════════════════════════════
-    // BUILD (internal)
-    // ═══════════════════════════════════════════════════════════════
-
-    internal GrpcChannel Build(DnsEndPoint primaryEndpoint);
-}
+var channel = GrpcLoadBalancedChannel.ForAddress("node1:2113", lb => lb
+    .WithSeeds("node2:2113", "node3:2113")
+    .WithPollingTopologySource(new MyTopologySource(), delay: TimeSpan.FromSeconds(30))
+    .WithResilience(r => r.Timeout = TimeSpan.FromSeconds(3))
+    .WithLoggerFactory(loggerFactory)
+    .ConfigureChannel(opts => opts.MaxReceiveMessageSize = 16 * 1024 * 1024));
 ```
 
-### LoadBalancingServiceBuilder (DI)
+### DI Registration
 
 ```csharp
-public sealed class LoadBalancingServiceBuilder {
-    readonly IServiceCollection _services;
-    readonly string _address;
-    readonly List<DnsEndPoint> _seeds = [];
-    ResilienceOptions _resilience = new();
+services.AddGrpcLoadBalancing("node1:2113")
+    .WithSeeds("node2:2113", "node3:2113")
+    .WithPollingTopologySource<MyNode, MyTopologySource>(delay: TimeSpan.FromSeconds(30))
+    .Build();
 
-    // Type registration info
-    Type? _topologySourceType;
-    Type? _nodeType;
-    object? _topologySourceInstance;
-    Func<IServiceProvider, object>? _topologySourceFactory;
-    bool _isStreaming;
-    TimeSpan? _delay;
-
-    ShouldRefreshTopology? _refreshPolicy;
-    Action<GrpcChannelOptions>? _configureChannel;
-
-    // ═══════════════════════════════════════════════════════════════
-    // SEEDS
-    // ═══════════════════════════════════════════════════════════════
-
-    public LoadBalancingServiceBuilder WithSeeds(params string[] endpoints);
-    public LoadBalancingServiceBuilder WithSeeds(params DnsEndPoint[] endpoints);
-    public LoadBalancingServiceBuilder WithSeeds(IEnumerable<DnsEndPoint> endpoints);
-
-    // ═══════════════════════════════════════════════════════════════
-    // RESILIENCE
-    // ═══════════════════════════════════════════════════════════════
-
-    public LoadBalancingServiceBuilder WithResilience(Action<ResilienceOptions> configure);
-
-    // ═══════════════════════════════════════════════════════════════
-    // POLLING TOPOLOGY SOURCE (3 overloads)
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Register topology source type for DI resolution.
-    /// </summary>
-    public LoadBalancingServiceBuilder WithPollingTopologySource<TNode, TSource>(
-        TimeSpan? delay = null)
-        where TNode : struct, IClusterNode
-        where TSource : class, IPollingTopologySource<TNode>;
-
-    /// <summary>
-    /// Use topology source instance.
-    /// </summary>
-    public LoadBalancingServiceBuilder WithPollingTopologySource<TNode>(
-        IPollingTopologySource<TNode> source,
-        TimeSpan? delay = null)
-        where TNode : struct, IClusterNode;
-
-    /// <summary>
-    /// Use factory for topology source creation.
-    /// </summary>
-    public LoadBalancingServiceBuilder WithPollingTopologySource<TNode>(
-        Func<IServiceProvider, IPollingTopologySource<TNode>> factory,
-        TimeSpan? delay = null)
-        where TNode : struct, IClusterNode;
-
-    // ═══════════════════════════════════════════════════════════════
-    // STREAMING TOPOLOGY SOURCE (3 overloads)
-    // ═══════════════════════════════════════════════════════════════
-
-    public LoadBalancingServiceBuilder WithStreamingTopologySource<TNode, TSource>()
-        where TNode : struct, IClusterNode
-        where TSource : class, IStreamingTopologySource<TNode>;
-
-    public LoadBalancingServiceBuilder WithStreamingTopologySource<TNode>(
-        IStreamingTopologySource<TNode> source)
-        where TNode : struct, IClusterNode;
-
-    public LoadBalancingServiceBuilder WithStreamingTopologySource<TNode>(
-        Func<IServiceProvider, IStreamingTopologySource<TNode>> factory)
-        where TNode : struct, IClusterNode;
-
-    // ═══════════════════════════════════════════════════════════════
-    // CONFIGURATION
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Configure from LoadBalancingOptions.
-    /// </summary>
-    public LoadBalancingServiceBuilder Configure(Action<LoadBalancingOptions> configure);
-
-    /// <summary>
-    /// Custom refresh policy.
-    /// </summary>
-    public LoadBalancingServiceBuilder WithRefreshPolicy(ShouldRefreshTopology policy);
-
-    /// <summary>
-    /// Configure the underlying GrpcChannel.
-    /// </summary>
-    public LoadBalancingServiceBuilder ConfigureChannel(Action<GrpcChannelOptions> configure);
-
-    // ═══════════════════════════════════════════════════════════════
-    // BUILD
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Register the configured channel in the service collection.
-    /// </summary>
-    public IServiceCollection Build();
-}
-```
-
-### ServiceCollection Extensions
-
-```csharp
-public static class ServiceCollectionExtensions {
-
-    /// <summary>
-    /// Add gRPC load balancing.
-    /// </summary>
-    public static LoadBalancingServiceBuilder AddGrpcLoadBalancing(
-        this IServiceCollection services,
-        string address) {
-
-        return new LoadBalancingServiceBuilder(services, address);
-    }
-
-    /// <summary>
-    /// Add gRPC load balancing from configuration.
-    /// </summary>
-    public static LoadBalancingServiceBuilder AddGrpcLoadBalancing(
-        this IServiceCollection services,
-        string address,
-        IConfiguration configuration) {
-
-        var builder = new LoadBalancingServiceBuilder(services, address);
-        var options = configuration.Get<LoadBalancingOptions>();
-
-        if (options?.Seeds is { Length: > 0 })
-            builder.WithSeeds(options.Seeds);
-
-        if (options?.Resilience is not null)
-            builder.WithResilience(r => {
-                r.Timeout = options.Resilience.Timeout;
-                r.MaxDiscoveryAttempts = options.Resilience.MaxDiscoveryAttempts;
-                r.InitialBackoff = options.Resilience.InitialBackoff;
-                r.MaxBackoff = options.Resilience.MaxBackoff;
-                r.RefreshOnStatusCodes = options.Resilience.RefreshOnStatusCodes;
-            });
-
-        return builder;
-    }
+// Inject
+public class MyService(GrpcChannel channel) {
+    readonly MyGrpcClient _client = new(channel);
 }
 ```
 
 ---
 
-## 7. Internal Architecture
+## 7. Sequence Diagrams
 
-### Component Overview
-
-```
-┌────────────────────────────────────────────────────────────────────────────────┐
-│                              GrpcChannel                                       │
-│                                                                                │
-│  ┌──────────────────────────────────────────────────────────────────────────┐ │
-│  │                         ClusterResolver                                   │ │
-│  │                                                                           │ │
-│  │  ┌─────────────────────┐    ┌──────────────────────────────────────────┐ │ │
-│  │  │  SeedChannelPool    │    │  IStreamingTopologySource<TNode>         │ │ │
-│  │  │  (internal channels │───►│  (user implementation OR                 │ │ │
-│  │  │   for discovery)    │    │   PollingToStreamingAdapter)             │ │ │
-│  │  └─────────────────────┘    └──────────────────────────────────────────┘ │ │
-│  │            │                              │                               │ │
-│  │            │         ┌────────────────────┘                               │ │
-│  │            ▼         ▼                                                    │ │
-│  │  ┌─────────────────────────────────────────────────────────────────────┐ │ │
-│  │  │  DiscoveryEngine                                                     │ │ │
-│  │  │  - Parallel fan-out to seeds                                         │ │ │
-│  │  │  - Exponential backoff with jitter                                   │ │ │
-│  │  │  - Periodic + reactive refresh                                       │ │ │
-│  │  └─────────────────────────────────────────────────────────────────────┘ │ │
-│  │                              │                                            │ │
-│  │                              ▼ ResolverResult(addresses)                  │ │
-│  └──────────────────────────────────────────────────────────────────────────┘ │
-│                                 │                                              │
-│  ┌──────────────────────────────▼───────────────────────────────────────────┐ │
-│  │                      ClusterLoadBalancer                                  │ │
-│  │                                                                           │ │
-│  │  ┌─────────────────────────────────────────────────────────────────────┐ │ │
-│  │  │  Subchannel Management                                               │ │ │
-│  │  │  - Creates subchannel per eligible node                              │ │ │
-│  │  │  - Monitors subchannel state                                         │ │ │
-│  │  │  - Triggers refresh on TRANSIENT_FAILURE                             │ │ │
-│  │  └─────────────────────────────────────────────────────────────────────┘ │ │
-│  │                              │                                            │ │
-│  │                              ▼                                            │ │
-│  │  ┌─────────────────────────────────────────────────────────────────────┐ │ │
-│  │  │  ClusterPicker (HOT PATH - ZERO ALLOCATION)                          │ │ │
-│  │  │                                                                      │ │ │
-│  │  │  - Pre-sorted subchannels by priority at construction                │ │ │
-│  │  │  - Atomic index for round-robin within top tier                      │ │ │
-│  │  │  - No LINQ, no lambdas, no allocations                               │ │ │
-│  │  └─────────────────────────────────────────────────────────────────────┘ │ │
-│  └──────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                │
-│  ┌──────────────────────────────────────────────────────────────────────────┐ │
-│  │  RefreshTriggerInterceptor                                                │ │
-│  │  - Intercepts RpcExceptions                                               │ │
-│  │  - Checks ShouldRefreshTopology policy                                    │ │
-│  │  - Triggers resolver.Refresh() on match                                   │ │
-│  └──────────────────────────────────────────────────────────────────────────┘ │
-└────────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Reactive Core
-
-The internal architecture is always streaming-based. Polling sources are wrapped:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Library Core (Reactive)                      │
-│                                                                 │
-│  IAsyncEnumerable<ClusterTopology<TNode>> ──► Resolver ──► LB   │
-│                      ▲                                          │
-│                      │                                          │
-│         ┌───────────┴────────────┐                             │
-│         │                        │                             │
-│  ┌──────┴──────┐    ┌───────────┴───────────┐                 │
-│  │  Streaming  │    │  PollingToStreaming   │                 │
-│  │   Source    │    │      Adapter          │                 │
-│  │  (native)   │    │  (wraps polling)      │                 │
-│  └─────────────┘    └───────────────────────┘                 │
-│         ▲                        ▲                             │
-└─────────┼────────────────────────┼─────────────────────────────┘
-          │                        │
-    User implements          User implements
-    IStreamingTopologySource IPollingTopologySource
-```
-
-### Node Selection Algorithm
-
-1. Filter: `IsEligible == true`
-2. Sort: Using source's `IComparer<TNode>` implementation (default: by Priority ascending)
-3. Group: Identify top priority tier (lowest priority value)
-4. Select: Round-robin within top tier
-
-```
-Example: Nodes [Leader(0), Follower1(1), Follower2(1), Follower3(1)]
-
-After sort: [Leader(0), Follower1(1), Follower2(1), Follower3(1)]
-Top tier: [Leader(0)] (only one node with priority 0)
-Selection: Always Leader
-
-Example: Nodes [Follower1(1), Follower2(1), Follower3(1)]
-
-After sort: [Follower1(1), Follower2(1), Follower3(1)]
-Top tier: All three (same priority)
-Selection: Round-robin → F1 → F2 → F3 → F1 → ...
-```
-
----
-
-## 8. Sequence Diagrams
-
-### Initial Discovery
+### Startup & Initial Discovery
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant GrpcLoadBalancedChannel
-    participant LoadBalancingBuilder
-    participant ClusterResolver
-    participant DiscoveryEngine
-    participant SeedChannelPool
-    participant TopologySource
-    participant Seed1
-    participant Seed2
-    participant ClusterLoadBalancer
-    participant ClusterPicker
+    participant Channel as GrpcChannel
+    participant Resolver as ClusterResolver
+    participant Pool as SeedChannelPool
+    participant Source as TopologySource
+    participant Seed as Seed Node
+    participant LB as LoadBalancer
+    participant Picker as ClusterPicker
 
-    User->>GrpcLoadBalancedChannel: ForAddress("node1:2113", configure)
-    GrpcLoadBalancedChannel->>LoadBalancingBuilder: new()
-    GrpcLoadBalancedChannel->>LoadBalancingBuilder: configure(builder)
-    LoadBalancingBuilder-->>GrpcLoadBalancedChannel: configured
+    User->>Channel: ForAddress("node1:2113", configure)
 
-    GrpcLoadBalancedChannel->>ClusterResolver: Create(config)
+    Note over Resolver: OnStarted()
+    Resolver->>Resolver: Start subscription loop
 
-    Note over ClusterResolver: Initial Resolution
-    ClusterResolver->>DiscoveryEngine: DiscoverAsync()
+    loop Try seeds sequentially
+        Resolver->>Pool: GetChannel(seed)
+        Pool-->>Resolver: gRPC channel
 
-    DiscoveryEngine->>SeedChannelPool: GetChannel(Seed1)
-    SeedChannelPool-->>DiscoveryEngine: channel1
+        Resolver->>Source: SubscribeAsync(context)
+        Source->>Seed: gRPC call (e.g., Gossip.Read)
 
-    par Parallel Discovery
-        DiscoveryEngine->>TopologySource: GetClusterAsync(context1)
-        TopologySource->>Seed1: Gossip.Read()
-        Seed1--xTopologySource: Connection refused
-        TopologySource-->>DiscoveryEngine: Exception
-    and
-        DiscoveryEngine->>TopologySource: GetClusterAsync(context2)
-        TopologySource->>Seed2: Gossip.Read()
-        Seed2-->>TopologySource: ClusterInfo
-        TopologySource-->>DiscoveryEngine: ClusterTopology<TNode>
+        alt Success
+            Seed-->>Source: Cluster info
+            Source-->>Resolver: yield ClusterTopology
+            Note over Resolver: Break loop, stay subscribed
+        else Failure
+            Seed--xSource: Error
+            Source--xResolver: Exception
+            Resolver->>Resolver: Log, try next seed
+        end
     end
 
-    DiscoveryEngine-->>ClusterResolver: ClusterTopology (first success)
+    Note over Resolver: Process topology
+    Resolver->>Resolver: Filter eligible nodes
+    Resolver->>Resolver: Sort using IComparer<TNode>
+    Resolver->>Resolver: Assign order index (0,1,2...)
 
-    ClusterResolver->>ClusterResolver: Filter eligible nodes
-    ClusterResolver->>ClusterResolver: Sort by Comparer
-    ClusterResolver->>ClusterResolver: Build BalancerAddresses
-    ClusterResolver->>ClusterLoadBalancer: UpdateAddresses(addresses)
+    Resolver->>LB: UpdateChannelState(addresses)
 
-    ClusterLoadBalancer->>ClusterLoadBalancer: Create Subchannels
-    ClusterLoadBalancer->>ClusterPicker: new(subchannels, comparer)
+    LB->>LB: Create subchannels
+    LB->>Picker: new ClusterPicker(ALL subchannels)
 
-    Note over ClusterPicker: Pre-sort at construction
-    Note over ClusterPicker: Identify top tier count
+    Note over Picker: Constructor
+    Picker->>Picker: Filter Ready subchannels
+    Picker->>Picker: Sort by order index
 
-    ClusterLoadBalancer-->>ClusterResolver: Ready
-    ClusterResolver-->>GrpcLoadBalancedChannel: Channel ready
-    GrpcLoadBalancedChannel-->>User: GrpcChannel
+    Picker-->>LB: Picker ready
+    LB-->>Channel: Ready
+    Channel-->>User: GrpcChannel
 ```
 
 ### Per-Call Pick (Hot Path)
@@ -872,61 +569,93 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Client
-    participant GrpcChannel
-    participant ClusterLoadBalancer
-    participant ClusterPicker
-    participant Subchannel
+    participant Channel as GrpcChannel
+    participant LB as LoadBalancer
+    participant Picker as ClusterPicker
+    participant Sub as Subchannel
     participant Server
 
-    Client->>GrpcChannel: AppendAsync(request)
-    GrpcChannel->>ClusterLoadBalancer: Pick()
-    ClusterLoadBalancer->>ClusterPicker: Pick(context)
+    Client->>Channel: client.DoSomethingAsync(request)
+    Channel->>LB: Pick()
+    LB->>Picker: Pick(context)
 
-    Note over ClusterPicker: ZERO ALLOCATION
-    Note over ClusterPicker: index = Interlocked.Increment(ref _index)
-    Note over ClusterPicker: return _subchannels[index % _topTierCount]
+    Note over Picker: ZERO ALLOCATION
+    Note over Picker: index = Interlocked.Increment(ref _index)
+    Note over Picker: return _readySubchannels[index % count]
 
-    ClusterPicker-->>ClusterLoadBalancer: PickResult(subchannel)
-    ClusterLoadBalancer-->>GrpcChannel: Subchannel
+    Picker-->>LB: PickResult(subchannel)
+    LB-->>Channel: Subchannel
 
-    GrpcChannel->>Subchannel: Send request
-    Subchannel->>Server: gRPC call
-    Server-->>Subchannel: Response
-    Subchannel-->>GrpcChannel: Response
-    GrpcChannel-->>Client: Response
+    Channel->>Sub: Send request
+    Sub->>Server: gRPC call
+    Server-->>Sub: Response
+    Sub-->>Channel: Response
+    Channel-->>Client: Response
 ```
 
-### Periodic Refresh (Polling)
+### Continuous Streaming Updates
 
 ```mermaid
 sequenceDiagram
-    participant Timer
-    participant PollingAdapter
-    participant TopologySource
-    participant ClusterResolver
-    participant ClusterLoadBalancer
-    participant ClusterPicker
+    participant Source as TopologySource
+    participant Resolver as ClusterResolver
+    participant LB as LoadBalancer
+    participant Picker as ClusterPicker
     participant Server
 
-    loop Every {delay} interval
-        Timer->>PollingAdapter: Tick
-        PollingAdapter->>TopologySource: GetClusterAsync(context)
-        TopologySource->>Server: Gossip.Read()
-        Server-->>TopologySource: ClusterInfo
-        TopologySource-->>PollingAdapter: ClusterTopology
-
-        PollingAdapter->>ClusterResolver: yield topology
+    loop await foreach (topology in source.SubscribeAsync())
+        Server-->>Source: Push topology update
+        Source-->>Resolver: yield ClusterTopology
 
         alt Topology changed
-            ClusterResolver->>ClusterResolver: Diff with previous
-            ClusterResolver->>ClusterLoadBalancer: UpdateAddresses(newAddresses)
-            ClusterLoadBalancer->>ClusterLoadBalancer: Add/Remove Subchannels
-            ClusterLoadBalancer->>ClusterPicker: new(updatedSubchannels)
-            Note over ClusterPicker: Atomic picker swap
+            Resolver->>Resolver: Sort, assign order index
+            Resolver->>LB: UpdateChannelState(addresses)
+            LB->>LB: Add/remove subchannels
+            LB->>Picker: new ClusterPicker(ALL subchannels)
+            Note over Picker: Atomic picker swap
         else No change
-            Note over ClusterResolver: Skip update
+            Note over Resolver: Skip update (same topology)
         end
     end
+
+    Note over Resolver: Stream ended
+    Resolver->>Resolver: Log, try next seed
+```
+
+### Seed Failover
+
+```mermaid
+sequenceDiagram
+    participant Resolver as ClusterResolver
+    participant Pool as SeedChannelPool
+    participant Source as TopologySource
+    participant Seed1
+    participant Seed2
+    participant Seed3
+
+    Note over Resolver: seedIndex = 0
+
+    Resolver->>Pool: GetChannel(Seed1)
+    Resolver->>Source: SubscribeAsync(context)
+    Source->>Seed1: gRPC call
+    Seed1--xSource: Connection refused
+    Source--xResolver: Exception
+    Resolver->>Resolver: Log error, seedIndex = 1
+
+    Resolver->>Pool: GetChannel(Seed2)
+    Resolver->>Source: SubscribeAsync(context)
+    Source->>Seed2: gRPC call
+    Seed2--xSource: Timeout
+    Source--xResolver: Exception
+    Resolver->>Resolver: Log error, seedIndex = 2
+
+    Resolver->>Pool: GetChannel(Seed3)
+    Resolver->>Source: SubscribeAsync(context)
+    Source->>Seed3: gRPC call
+    Seed3-->>Source: Cluster info
+    Source-->>Resolver: yield ClusterTopology
+
+    Note over Resolver: Success! Stay connected to Seed3
 ```
 
 ### Reactive Refresh on Failure
@@ -934,90 +663,165 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Client
-    participant GrpcChannel
-    participant RefreshTriggerInterceptor
-    participant ClusterResolver
-    participant DiscoveryEngine
-    participant TopologySource
+    participant Interceptor as RefreshInterceptor
+    participant Resolver as ClusterResolver
+    participant Source as TopologySource
     participant OldLeader
     participant NewLeader
-    participant ClusterLoadBalancer
-    participant ClusterPicker
+    participant LB as LoadBalancer
+    participant Picker as ClusterPicker
 
-    Client->>GrpcChannel: AppendAsync(request)
-    GrpcChannel->>RefreshTriggerInterceptor: Intercept
-    RefreshTriggerInterceptor->>OldLeader: Forward call
-    OldLeader--xRefreshTriggerInterceptor: RpcException(Unavailable)
+    Client->>Interceptor: DoSomethingAsync(request)
+    Interceptor->>OldLeader: Forward call
+    OldLeader--xInterceptor: RpcException(Unavailable)
 
-    RefreshTriggerInterceptor->>RefreshTriggerInterceptor: ShouldRefreshTopology(ex)?
-    Note over RefreshTriggerInterceptor: Yes - StatusCode.Unavailable
+    Interceptor->>Interceptor: ShouldRefresh? Yes
+    Interceptor->>Resolver: Refresh()
 
-    RefreshTriggerInterceptor->>ClusterResolver: Refresh()
+    Note over Resolver: Cancel current subscription
+    Note over Resolver: Start new subscription loop
 
-    Note over ClusterResolver: Immediate refresh triggered
-    ClusterResolver->>DiscoveryEngine: DiscoverAsync()
-    DiscoveryEngine->>TopologySource: GetClusterAsync(context)
-    TopologySource->>NewLeader: Gossip.Read()
-    NewLeader-->>TopologySource: ClusterInfo (new topology)
-    TopologySource-->>DiscoveryEngine: ClusterTopology
-    DiscoveryEngine-->>ClusterResolver: Topology
+    Resolver->>Source: SubscribeAsync(context)
+    Source->>NewLeader: gRPC call
+    NewLeader-->>Source: Updated topology
+    Source-->>Resolver: yield ClusterTopology
 
-    ClusterResolver->>ClusterLoadBalancer: UpdateAddresses(newAddresses)
-    ClusterLoadBalancer->>ClusterPicker: new(newSubchannels)
-    Note over ClusterPicker: Atomic picker swap
+    Resolver->>LB: UpdateChannelState(newAddresses)
+    LB->>Picker: new ClusterPicker(subchannels)
 
-    RefreshTriggerInterceptor-->>Client: RpcException (caller retries)
+    Interceptor-->>Client: RpcException (client retries)
 
-    Note over Client: Retry
-    Client->>GrpcChannel: AppendAsync(request) [retry]
-    GrpcChannel->>ClusterPicker: Pick()
-    ClusterPicker-->>GrpcChannel: NewLeader subchannel
-    GrpcChannel->>NewLeader: Send request
+    Note over Client: Retry with new picker
+    Client->>Interceptor: DoSomethingAsync(request)
+    Interceptor->>NewLeader: Forward call
     NewLeader-->>Client: Success
 ```
 
-### Discovery Failure with Backoff
+---
 
-```mermaid
-sequenceDiagram
-    participant DiscoveryEngine
-    participant SeedChannelPool
-    participant TopologySource
-    participant Seed1
-    participant Seed2
-    participant Seed3
+## 8. Design Decisions & Rationale
 
-    Note over DiscoveryEngine: Attempt 1
+### Decision 1: Separation of Concerns
 
-    par Parallel to all seeds
-        DiscoveryEngine->>TopologySource: GetClusterAsync(seed1)
-        TopologySource->>Seed1: Gossip.Read()
-        Seed1--xTopologySource: Timeout
-    and
-        DiscoveryEngine->>TopologySource: GetClusterAsync(seed2)
-        TopologySource->>Seed2: Gossip.Read()
-        Seed2--xTopologySource: Connection refused
-    and
-        DiscoveryEngine->>TopologySource: GetClusterAsync(seed3)
-        TopologySource->>Seed3: Gossip.Read()
-        Seed3--xTopologySource: Unavailable
-    end
+**Choice:** Each component (Resolver, LoadBalancer, Picker) has a single responsibility.
 
-    Note over DiscoveryEngine: All seeds failed
-    Note over DiscoveryEngine: Backoff: 100ms * 2^0 = 100ms + jitter
-    DiscoveryEngine->>DiscoveryEngine: await Task.Delay(~100ms)
+**Rationale:**
+- **Testability**: Each component can be tested in isolation
+- **Maintainability**: Changes to one concern don't affect others
+- **Clarity**: Easy to understand what each component does
 
-    Note over DiscoveryEngine: Attempt 2
+**Implementation:**
+| Component | Does | Does NOT |
+|-----------|------|----------|
+| Resolver | Discovers addresses | Manage connections, pick |
+| LoadBalancer | Manages connections | Filter, sort, pick |
+| Picker | Picks connection per request | Discover, manage connections |
 
-    par Parallel to all seeds
-        DiscoveryEngine->>TopologySource: GetClusterAsync(seed1)
-        TopologySource->>Seed1: Gossip.Read()
-        Seed1-->>TopologySource: ClusterInfo
-        TopologySource-->>DiscoveryEngine: ClusterTopology ✓
-    end
+### Decision 2: Comparer on Topology Source
 
-    Note over DiscoveryEngine: Success! Cancel other pending calls
-    DiscoveryEngine-->>DiscoveryEngine: Return topology
+**Choice:** The `IComparer<TNode>` is defined on the topology source interface.
+
+**Rationale:**
+- The topology source knows the domain (node types, priorities, datacenters)
+- Custom sorting logic can use domain-specific fields
+- Single place to define "which nodes are preferred"
+
+**Implementation:**
+```csharp
+// Default: sort by Priority
+int IComparer<TNode>.Compare(TNode x, TNode y) => x.Priority.CompareTo(y.Priority);
+
+// Custom: prefer same datacenter
+public int Compare(MyNode x, MyNode y) {
+    var xLocal = x.Datacenter == _myDc ? 0 : 1;
+    var yLocal = y.Datacenter == _myDc ? 0 : 1;
+    return xLocal != yLocal ? xLocal.CompareTo(yLocal) : x.Priority.CompareTo(y.Priority);
+}
+```
+
+### Decision 3: Order Index Instead of Direct Comparer in Picker
+
+**Choice:** Resolver sorts and assigns order index; Picker sorts by index.
+
+**Rationale:**
+- Picker only has `Subchannel` objects, not `TNode` objects
+- Order index preserves comparer's sort order across the boundary
+- Simple integer comparison in Picker (fast)
+
+**Implementation:**
+```csharp
+// In Resolver
+eligible.Sort(_topologySource);  // Uses IComparer<TNode>
+for (var i = 0; i < eligible.Count; i++) {
+    attributes.Add(OrderIndexKey, i);  // Preserve order
+}
+
+// In Picker
+ready.Sort((a, b) => GetOrderIndex(a).CompareTo(GetOrderIndex(b)));
+```
+
+### Decision 4: LoadBalancer Passes ALL Subchannels
+
+**Choice:** LoadBalancer passes all subchannels to Picker, not just Ready ones.
+
+**Rationale:**
+- **Separation of concerns**: LoadBalancer manages connections, Picker decides what's usable
+- **Flexibility**: Picker could implement more sophisticated logic (e.g., prefer Connecting over none)
+- **Immutability**: New Picker is created on state change; it sees snapshot of all subchannels
+
+### Decision 5: Sequential Seed Iteration (Not Parallel)
+
+**Choice:** On failure, try seeds one at a time in round-robin order.
+
+**Rationale:**
+- **Simplicity**: Easy to understand and debug
+- **Efficiency**: No need to cancel parallel tasks
+- **Streaming model**: Stay connected to one seed's stream; only switch on failure
+
+### Decision 6: ClusterTopology as Value Object
+
+**Choice:** `ClusterTopology<TNode>` is a record struct with value equality.
+
+**Rationale:**
+- **Comparison**: Can check `if (oldTopology != newTopology)` efficiently
+- **Caching**: Hash code and eligible count computed once at construction
+- **Immutability**: Safe to pass around, no defensive copies needed
+
+**Implementation:**
+```csharp
+public readonly record struct ClusterTopology<TNode>(ImmutableArray<TNode> Nodes) {
+    readonly int _cachedHashCode;
+    readonly int _eligibleCount;
+
+    public ClusterTopology(ImmutableArray<TNode> nodes) : this() {
+        Nodes = nodes;
+        _cachedHashCode = ComputeHashCode(nodes);
+        _eligibleCount = CountEligible(nodes);
+    }
+}
+```
+
+### Decision 7: Streaming-First Internal Architecture
+
+**Choice:** Everything internally is streaming-based; polling is adapted.
+
+**Rationale:**
+- **Reactive**: Immediately process topology updates as they arrive
+- **Unified**: One code path for both polling and streaming sources
+- **Natural**: `await foreach` fits perfectly
+
+**Implementation:**
+```csharp
+// Resolver just iterates
+await foreach (var topology in _topologySource.SubscribeAsync(context, ct)) {
+    // Process topology update
+}
+
+// Polling adapter yields periodically
+while (!ct.IsCancellationRequested) {
+    yield return await _pollingSource.GetClusterAsync(context);
+    await Task.Delay(_delay, ct);
+}
 ```
 
 ---
@@ -1027,428 +831,306 @@ sequenceDiagram
 ### Exception Hierarchy
 
 ```csharp
-namespace Raging.Grpc.LoadBalancing;
+public abstract class LoadBalancingException : Exception;
 
-/// <summary>
-/// Base exception for load balancing errors.
-/// </summary>
-public abstract class LoadBalancingException : Exception {
-    protected LoadBalancingException(string message) : base(message) { }
-    protected LoadBalancingException(string message, Exception innerException)
-        : base(message, innerException) { }
-}
-
-/// <summary>
-/// Configuration is invalid or incomplete.
-/// </summary>
-public sealed class LoadBalancingConfigurationException : LoadBalancingException {
-    public LoadBalancingConfigurationException(string message) : base(message) { }
-}
-
-/// <summary>
-/// Failed to discover cluster topology after all attempts.
-/// </summary>
-public sealed class ClusterDiscoveryException : LoadBalancingException {
-    public int Attempts { get; }
-    public IReadOnlyList<DnsEndPoint> TriedEndpoints { get; }
-    public IReadOnlyList<Exception> Exceptions { get; }
-
-    public ClusterDiscoveryException(
-        int attempts,
-        IReadOnlyList<DnsEndPoint> triedEndpoints,
-        IReadOnlyList<Exception> exceptions)
-        : base($"Failed to discover cluster after {attempts} attempts across {triedEndpoints.Count} endpoints.") {
-        Attempts = attempts;
-        TriedEndpoints = triedEndpoints;
-        Exceptions = exceptions;
-    }
-}
-
-/// <summary>
-/// No eligible nodes available in the cluster.
-/// </summary>
-public sealed class NoEligibleNodesException : LoadBalancingException {
-    public int TotalNodes { get; }
-
-    public NoEligibleNodesException(int totalNodes)
-        : base($"No eligible nodes available. Cluster has {totalNodes} nodes but none are eligible.") {
-        TotalNodes = totalNodes;
-    }
-}
-
-/// <summary>
-/// Topology operation failed.
-/// </summary>
-public sealed class TopologyException : LoadBalancingException {
-    public DnsEndPoint Endpoint { get; }
-
-    public TopologyException(DnsEndPoint endpoint, Exception innerException)
-        : base($"Topology call to {endpoint.Host}:{endpoint.Port} failed.", innerException) {
-        Endpoint = endpoint;
-    }
-}
+public sealed class LoadBalancingConfigurationException : LoadBalancingException;
+public sealed class ClusterDiscoveryException : LoadBalancingException;
+public sealed class NoEligibleNodesException : LoadBalancingException;
+public sealed class TopologyException : LoadBalancingException;
 ```
+
+### Failure Scenarios
+
+| Scenario | Behavior |
+|----------|----------|
+| Seed connection fails | Log, try next seed |
+| Stream ends without data | Log `TopologyStreamEmpty`, try next seed |
+| All seeds fail continuously | Keep trying (round-robin through seeds) |
+| Topology returns no eligible nodes | Throw `NoEligibleNodesException` |
+| Topology returns empty | Throw `ClusterDiscoveryException` |
+| gRPC call fails with Unavailable | Trigger refresh via interceptor |
 
 ### Refresh Policy
 
 ```csharp
-/// <summary>
-/// Determines if an RPC exception should trigger topology refresh.
-/// </summary>
 public delegate bool ShouldRefreshTopology(RpcException exception);
 
-/// <summary>
-/// Built-in refresh policies.
-/// </summary>
 public static class RefreshPolicy {
-
-    /// <summary>
-    /// Refresh on Unavailable status (connection issues).
-    /// </summary>
     public static readonly ShouldRefreshTopology Default =
         static ex => ex.StatusCode == StatusCode.Unavailable;
 
-    /// <summary>
-    /// Refresh on any of the specified status codes.
-    /// </summary>
-    public static ShouldRefreshTopology OnStatusCodes(params StatusCode[] codes) {
-        var set = codes.ToHashSet();
-        return ex => set.Contains(ex.StatusCode);
-    }
-
-    /// <summary>
-    /// Refresh when exception message contains any of the specified strings.
-    /// </summary>
-    public static ShouldRefreshTopology OnMessageContains(params string[] triggers) =>
-        ex => triggers.Any(t => ex.Message.Contains(t, StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>
-    /// Combine multiple policies (refresh if ANY match).
-    /// </summary>
-    public static ShouldRefreshTopology Any(params ShouldRefreshTopology[] policies) =>
-        ex => policies.Any(p => p(ex));
+    public static ShouldRefreshTopology OnStatusCodes(params StatusCode[] codes);
 }
 ```
 
 ---
 
-## 10. File Structure
+## 10. Performance Considerations
+
+### Allocation Budgets
+
+| Path | Allocation Budget | Frequency |
+|------|-------------------|-----------|
+| `Pick()` | **0 bytes** | Every gRPC call (millions/sec) |
+| Topology update | < 4 KB | Every few seconds |
+| Picker creation | < 1 KB | On topology change |
+| Startup | Unbounded | Once |
+
+### Hot Path: Pick()
+
+```csharp
+public override PickResult Pick(PickContext context) {
+    // ZERO ALLOCATION - called on every gRPC call
+
+    if (_readySubchannels.Length == 0)
+        return PickResult.ForFailure(NoReadyNodesStatus);  // Static instance
+
+    var index = Interlocked.Increment(ref _roundRobinIndex);
+    var count = _readySubchannels.Length;
+    var selectedIndex = ((index % count) + count) % count;
+
+    return PickResult.ForSubchannel(_readySubchannels[selectedIndex]);
+}
+```
+
+### Cold Path: Picker Construction
+
+```csharp
+public ClusterPicker(IReadOnlyList<Subchannel> subchannels) {
+    // COLD PATH - only on topology change
+
+    var ready = new List<Subchannel>();  // Allocation OK here
+    foreach (var s in subchannels)
+        if (s.State == ConnectivityState.Ready)
+            ready.Add(s);
+
+    ready.Sort((a, b) => GetOrderIndex(a).CompareTo(GetOrderIndex(b)));
+    _readySubchannels = [.. ready];
+}
+```
+
+### ConfigureAwait(false)
+
+All async methods use `ConfigureAwait(false)`:
+
+```csharp
+await _topologySource.SubscribeAsync(context, ct).ConfigureAwait(false);
+await Task.Delay(delay, ct).ConfigureAwait(false);
+```
+
+---
+
+## 11. File Structure
 
 ```
 src/Raging.Grpc.LoadBalancing/
 │
 ├── Raging.Grpc.LoadBalancing.csproj
-│
-├── GrpcLoadBalancedChannel.cs                 # Static entry points
-├── LoadBalancingBuilder.cs                    # Non-DI builder
+├── GrpcLoadBalancedChannel.cs              # Static entry point
+├── LoadBalancingBuilder.cs                 # Non-DI builder
 │
 ├── Abstractions/
-│   ├── IClusterNode.cs
-│   ├── IPollingTopologySource.cs
-│   ├── IStreamingTopologySource.cs
-│   ├── TopologyContext.cs
-│   └── ClusterTopology.cs
+│   ├── IClusterNode.cs                     # Node interface
+│   ├── IPollingTopologySource.cs           # Polling source interface
+│   ├── IStreamingTopologySource.cs         # Streaming source interface
+│   ├── TopologyContext.cs                  # Context record
+│   └── ClusterTopology.cs                  # Topology value object
 │
 ├── Configuration/
-│   ├── LoadBalancingOptions.cs                # POCO for JSON
-│   ├── ResilienceOptions.cs
-│   ├── ShouldRefreshTopology.cs               # Delegate
-│   └── RefreshPolicy.cs                       # Static helpers
+│   ├── LoadBalancingOptions.cs             # POCO options
+│   ├── ResilienceOptions.cs                # Resilience config
+│   ├── ShouldRefreshTopology.cs            # Delegate
+│   └── RefreshPolicy.cs                    # Built-in policies
 │
 ├── Exceptions/
-│   ├── LoadBalancingException.cs              # Base
+│   ├── LoadBalancingException.cs           # Base exception
 │   ├── LoadBalancingConfigurationException.cs
 │   ├── ClusterDiscoveryException.cs
 │   ├── NoEligibleNodesException.cs
 │   └── TopologyException.cs
 │
 ├── Internal/
-│   ├── ClusterResolver.cs
+│   ├── ClusterResolver.cs                  # Topology → addresses
 │   ├── ClusterResolverFactory.cs
-│   ├── ClusterLoadBalancer.cs
+│   ├── ClusterLoadBalancer.cs              # Manages subchannels
 │   ├── ClusterLoadBalancerFactory.cs
-│   ├── ClusterPicker.cs
-│   ├── DiscoveryEngine.cs
-│   ├── PollingToStreamingAdapter.cs
-│   ├── RefreshTriggerInterceptor.cs
-│   ├── SeedChannelPool.cs
-│   ├── DefaultNodeComparer.cs
-│   └── Log.cs                                 # Source-generated logging
-│
-├── Utilities/
-│   └── EndpointParser.cs
+│   ├── ClusterPicker.cs                    # Picks per request
+│   ├── PollingToStreamingAdapter.cs        # Wraps polling source
+│   ├── RefreshTriggerInterceptor.cs        # Triggers refresh on error
+│   ├── SeedChannelPool.cs                  # Reusable seed channels
+│   ├── BackoffCalculator.cs                # Exponential backoff
+│   ├── EndpointParser.cs                   # "host:port" parsing
+│   └── Log.cs                              # Source-generated logging
 │
 └── Extensions/
-    ├── ServiceCollectionExtensions.cs
-    └── LoadBalancingServiceBuilder.cs
-```
-
-### Project File
-
-```xml
-<Project Sdk="Microsoft.NET.Sdk">
-
-  <PropertyGroup>
-    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <LangVersion>latest</LangVersion>
-    <RootNamespace>Raging.Grpc.LoadBalancing</RootNamespace>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-  </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />
-    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="9.0.0" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.0" />
-  </ItemGroup>
-
-</Project>
+    ├── ServiceCollectionExtensions.cs      # DI registration
+    └── LoadBalancingServiceBuilder.cs      # DI builder
 ```
 
 ---
 
-## 11. Edge Cases & Behaviors
+## 12. Examples
 
-| Scenario | Behavior |
-|----------|----------|
-| All seeds fail on startup | Throw `ClusterDiscoveryException` after `MaxDiscoveryAttempts` |
-| Topology refresh returns empty nodes | Throw `ClusterDiscoveryException` |
-| Nodes exist but none eligible | Throw `NoEligibleNodesException` |
-| Disposal during discovery | Cancel via `CancellationToken`, graceful exit |
-| Seed format invalid | Throw `LoadBalancingConfigurationException` |
-| No topology source configured | Throw `LoadBalancingConfigurationException` |
-| No seeds configured | Throw `LoadBalancingConfigurationException` |
-| Duplicate seeds | Deduplicate silently |
-| Topology source throws | Log warning, retry with backoff |
-| All subchannels fail | Trigger immediate refresh |
-| Primary address equals a seed | Deduplicate (primary is always first seed) |
-
----
-
-## 12. Performance Considerations
-
-### Allocation Budgets
-
-| Path | Allocation Budget | Notes |
-|------|-------------------|-------|
-| `Pick()` (per-call) | **0 bytes** | Absolutely zero - called millions of times |
-| Topology refresh | < 4 KB | Parse response, update addresses |
-| Reconnect/Picker swap | < 1 KB | New picker instance, subchannel setup |
-| Startup | Unbounded | One-time setup is acceptable |
-
-### ClusterPicker Implementation
+### Example 1: Simple Polling Source
 
 ```csharp
-internal sealed class ClusterPicker : SubchannelPicker {
-    readonly Subchannel[] _subchannels;   // Pre-sorted at construction
-    readonly int _topTierCount;            // Nodes in lowest priority tier
-    int _roundRobinIndex;
+// Define node type
+public readonly record struct MyNode(
+    DnsEndPoint EndPoint,
+    bool IsEligible,
+    int Priority
+) : IClusterNode;
 
-    public ClusterPicker(IReadOnlyList<Subchannel> subchannels) {
-        // COLD PATH: Sorting happens here, at construction
-        _subchannels = [..subchannels];  // Already sorted by LoadBalancer
-        _topTierCount = CountTopTier(_subchannels);
+// Implement topology source (uses default comparer - by Priority)
+public sealed class MyTopologySource : IPollingTopologySource<MyNode> {
+
+    public async ValueTask<ClusterTopology<MyNode>> GetClusterAsync(TopologyContext context) {
+        var client = new ClusterService.ClusterServiceClient(context.Channel);
+
+        var response = await client.GetNodesAsync(
+            new GetNodesRequest(),
+            cancellationToken: context.CancellationToken);
+
+        var nodes = response.Nodes
+            .Select(n => new MyNode(
+                EndPoint: new DnsEndPoint(n.Host, n.Port),
+                IsEligible: n.Status == NodeStatus.Ready,
+                Priority: n.IsLeader ? 0 : 1))
+            .ToImmutableArray();
+
+        return new ClusterTopology<MyNode>(nodes);
+    }
+}
+
+// Use it
+var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource(new MyTopologySource(), delay: TimeSpan.FromSeconds(30)));
+
+var client = new MyService.MyServiceClient(channel);
+await client.DoSomethingAsync(request);
+```
+
+### Example 2: Custom Comparer (Datacenter Affinity)
+
+```csharp
+public readonly record struct MyNode(
+    DnsEndPoint EndPoint,
+    bool IsEligible,
+    int Priority,
+    string Datacenter
+) : IClusterNode;
+
+public sealed class DatacenterAwareSource : IPollingTopologySource<MyNode> {
+    readonly string _preferredDc;
+
+    public DatacenterAwareSource(string preferredDc) => _preferredDc = preferredDc;
+
+    public async ValueTask<ClusterTopology<MyNode>> GetClusterAsync(TopologyContext context) {
+        // ... fetch nodes
     }
 
-    public override PickResult Pick(PickContext context) {
-        // HOT PATH: ZERO ALLOCATIONS
+    // Custom comparer: prefer same datacenter, then by priority
+    public int Compare(MyNode x, MyNode y) {
+        var xLocal = x.Datacenter == _preferredDc ? 0 : 1;
+        var yLocal = y.Datacenter == _preferredDc ? 0 : 1;
 
-        if (_subchannels.Length == 0)
-            return PickResult.ForFailure(NoEligibleNodesStatus);
+        if (xLocal != yLocal)
+            return xLocal.CompareTo(yLocal);
 
-        // Atomic increment, round-robin within top tier
-        var index = Interlocked.Increment(ref _roundRobinIndex);
-        var selected = _subchannels[((index % _topTierCount) + _topTierCount) % _topTierCount];
-
-        return PickResult.ForSubchannel(selected);
+        return x.Priority.CompareTo(y.Priority);
     }
+}
 
-    static int CountTopTier(Subchannel[] sorted) {
-        if (sorted.Length == 0) return 0;
+// Use it - nodes in same DC are preferred
+var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource(new DatacenterAwareSource("us-east-1")));
+```
 
-        var topPriority = GetPriority(sorted[0]);
-        var count = 1;
+### Example 3: Streaming Source (Server Push)
 
-        for (var i = 1; i < sorted.Length; i++) {
-            if (GetPriority(sorted[i]) != topPriority)
-                break;
-            count++;
+```csharp
+public sealed class StreamingTopologySource : IStreamingTopologySource<MyNode> {
+
+    public async IAsyncEnumerable<ClusterTopology<MyNode>> SubscribeAsync(
+        TopologyContext context,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default) {
+
+        var client = new ClusterService.ClusterServiceClient(context.Channel);
+
+        using var stream = client.WatchCluster(
+            new WatchRequest(),
+            cancellationToken: cancellationToken);
+
+        await foreach (var update in stream.ResponseStream.ReadAllAsync(cancellationToken)) {
+            var nodes = update.Nodes
+                .Select(n => new MyNode(...))
+                .ToImmutableArray();
+
+            yield return new ClusterTopology<MyNode>(nodes);
         }
-
-        return count;
-    }
-
-    static int GetPriority(Subchannel subchannel) =>
-        subchannel.Attributes.TryGetValue(ClusterAttributes.Priority, out var p) ? p : int.MaxValue;
-
-    static readonly Status NoEligibleNodesStatus =
-        new(StatusCode.Unavailable, "No eligible nodes available in cluster.");
-}
-```
-
-### ConfigureAwait(false)
-
-All async methods MUST use `ConfigureAwait(false)`:
-
-```csharp
-// ✅ Correct
-var response = await client.ReadAsync(request, ct).ConfigureAwait(false);
-await Task.Delay(backoff, ct).ConfigureAwait(false);
-
-// ❌ Wrong - can cause deadlocks
-var response = await client.ReadAsync(request, ct);
-```
-
----
-
-## 13. Implementation Notes
-
-### Source-Generated Logging
-
-```csharp
-namespace Raging.Grpc.LoadBalancing.Internal;
-
-internal static partial class Log {
-
-    [LoggerMessage(
-        Level = LogLevel.Debug,
-        Message = "Discovering cluster from {Endpoint}")]
-    public static partial void DiscoveringCluster(this ILogger logger, DnsEndPoint endpoint);
-
-    [LoggerMessage(
-        Level = LogLevel.Information,
-        Message = "Discovered {NodeCount} nodes, {EligibleCount} eligible")]
-    public static partial void DiscoveredNodes(this ILogger logger, int nodeCount, int eligibleCount);
-
-    [LoggerMessage(
-        Level = LogLevel.Warning,
-        Message = "Topology call to {Endpoint} failed")]
-    public static partial void TopologyCallFailed(this ILogger logger, DnsEndPoint endpoint, Exception exception);
-
-    [LoggerMessage(
-        Level = LogLevel.Warning,
-        Message = "All seeds failed, attempt {Attempt}/{MaxAttempts}, backing off {BackoffMs}ms")]
-    public static partial void AllSeedsFailed(this ILogger logger, int attempt, int maxAttempts, int backoffMs);
-
-    [LoggerMessage(
-        Level = LogLevel.Debug,
-        Message = "Topology refresh triggered by status code {StatusCode}")]
-    public static partial void RefreshTriggered(this ILogger logger, StatusCode statusCode);
-
-    [LoggerMessage(
-        Level = LogLevel.Debug,
-        Message = "Picked node {Endpoint} (priority: {Priority}, tier position: {TierPosition})")]
-    public static partial void PickedNode(this ILogger logger, DnsEndPoint endpoint, int priority, int tierPosition);
-
-    [LoggerMessage(
-        Level = LogLevel.Information,
-        Message = "Topology changed: {AddedCount} added, {RemovedCount} removed, {ChangedCount} changed")]
-    public static partial void TopologyChanged(this ILogger logger, int addedCount, int removedCount, int changedCount);
-
-    [LoggerMessage(
-        Level = LogLevel.Debug,
-        Message = "Picker updated with {SubchannelCount} subchannels, top tier has {TopTierCount} nodes")]
-    public static partial void PickerUpdated(this ILogger logger, int subchannelCount, int topTierCount);
-}
-```
-
-### EndpointParser
-
-```csharp
-namespace Raging.Grpc.LoadBalancing.Utilities;
-
-public static class EndpointParser {
-
-    /// <summary>
-    /// Parse single endpoint. Format: "host:port"
-    /// </summary>
-    public static DnsEndPoint Parse(string input) {
-        ArgumentException.ThrowIfNullOrWhiteSpace(input);
-
-        var trimmed = input.Trim();
-        var colonIndex = trimmed.LastIndexOf(':');
-
-        if (colonIndex <= 0 || colonIndex == trimmed.Length - 1)
-            throw new LoadBalancingConfigurationException(
-                $"Invalid endpoint format: '{input}'. Expected 'host:port'.");
-
-        var host = trimmed[..colonIndex];
-        var portStr = trimmed[(colonIndex + 1)..];
-
-        if (!int.TryParse(portStr, out var port) || port is <= 0 or > 65535)
-            throw new LoadBalancingConfigurationException(
-                $"Invalid port in endpoint: '{input}'.");
-
-        return new DnsEndPoint(host, port);
     }
 }
+
+// Use it - topology updates are pushed by server
+var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithStreamingTopologySource(new StreamingTopologySource()));
 ```
 
-### Backoff Calculation
+### Example 4: DI Registration with Factory
 
 ```csharp
-internal static class BackoffCalculator {
+// Register with factory for DI
+services.AddGrpcLoadBalancing("node1:5000")
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource<MyNode>(sp => {
+        var config = sp.GetRequiredService<IOptions<MyConfig>>().Value;
+        var logger = sp.GetRequiredService<ILogger<MyTopologySource>>();
+        return new MyTopologySource(config, logger);
+    })
+    .ConfigureChannel(opts => {
+        opts.Credentials = ChannelCredentials.SecureSsl;
+    })
+    .Build();
 
-    public static TimeSpan Calculate(int attempt, TimeSpan initial, TimeSpan max) {
-        // Exponential: initial * 2^(attempt-1)
-        var exponentialTicks = initial.Ticks * (1L << Math.Min(attempt - 1, 30));
-        var cappedTicks = Math.Min(exponentialTicks, max.Ticks);
+// Inject and use
+public class MyService {
+    readonly MyGrpcClient _client;
 
-        // Jitter: ±10%
-        var jitter = Random.Shared.NextDouble() * 0.2 - 0.1;
-        var jitteredTicks = (long)(cappedTicks * (1.0 + jitter));
-
-        return TimeSpan.FromTicks(jitteredTicks);
+    public MyService(GrpcChannel channel) {
+        _client = new MyGrpcClient(channel);
     }
+
+    public Task DoWorkAsync() => _client.DoSomethingAsync(new Request());
 }
 ```
 
-### gRPC Integration
-
-The library integrates with gRPC's load balancing infrastructure via:
-
-1. **Custom Resolver Factory**: Registered in `ServiceProvider`
-2. **Custom Load Balancer Factory**: Registered in `ServiceProvider`
-3. **Custom URI Scheme**: `cluster:///` triggers our resolver
+### Example 5: Custom Refresh Policy
 
 ```csharp
-internal static GrpcChannel CreateChannel(/* params */) {
-    var services = new ServiceCollection();
-
-    services.AddSingleton<ResolverFactory>(
-        new ClusterResolverFactory(config, topologySource, loggerFactory));
-
-    services.AddSingleton<LoadBalancerFactory>(
-        new ClusterLoadBalancerFactory(config));
-
-    var channelOptions = userChannelOptions?.Clone() ?? new GrpcChannelOptions();
-    channelOptions.ServiceProvider = services.BuildServiceProvider();
-
-    // Add refresh trigger interceptor
-    var existingInterceptors = channelOptions.Interceptors ?? [];
-    channelOptions.Interceptors = [
-        new RefreshTriggerInterceptor(refreshPolicy, resolver.Refresh),
-        ..existingInterceptors
-    ];
-
-    // Use custom scheme to trigger our resolver
-    return GrpcChannel.ForAddress($"cluster:///{Guid.NewGuid()}", channelOptions);
-}
+var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource(new MyTopologySource())
+    .WithRefreshPolicy(RefreshPolicy.Any(
+        RefreshPolicy.Default,  // Unavailable
+        RefreshPolicy.OnStatusCodes(StatusCode.NotFound, StatusCode.Internal),
+        ex => ex.Message.Contains("leader changed", StringComparison.OrdinalIgnoreCase)
+    )));
 ```
 
 ---
 
 ## Summary
 
-This specification defines a complete, production-ready gRPC load balancer with:
+This load balancer provides:
 
-- **Simple API**: One interface to implement
-- **Flexible Configuration**: JSON + fluent builder + DI
-- **High Performance**: Zero-allocation hot path
-- **Resilient**: Retry, backoff, reactive refresh
-- **Observable**: Source-generated logging
-- **Extensible**: Custom comparison via interface
+- **Simple API**: Implement one interface, get full load balancing
+- **Clear Separation**: Resolver discovers, LoadBalancer connects, Picker selects
+- **High Performance**: Zero allocations on hot path
+- **Flexible Selection**: Custom comparer for any selection logic
+- **Resilient**: Automatic seed failover, refresh on errors
+- **Observable**: Source-generated structured logging
 
-The implementation follows Microsoft's recommended gRPC load balancing patterns while providing a much simpler developer experience.
+The implementation follows gRPC's native load balancing patterns while providing a much simpler developer experience.
