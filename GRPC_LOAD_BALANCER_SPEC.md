@@ -15,13 +15,14 @@
 3. [Architecture](#3-architecture)
 4. [Component Design & Responsibilities](#4-component-design--responsibilities)
 5. [Contracts & Interfaces](#5-contracts--interfaces)
-6. [Configuration](#6-configuration)
+6. [Configuration & API Reference](#6-configuration--api-reference)
 7. [Sequence Diagrams](#7-sequence-diagrams)
 8. [Design Decisions & Rationale](#8-design-decisions--rationale)
 9. [Error Handling](#9-error-handling)
 10. [Performance Considerations](#10-performance-considerations)
 11. [File Structure](#11-file-structure)
 12. [Examples](#12-examples)
+13. [Internal Implementation Reference](#13-internal-implementation-reference)
 
 ---
 
@@ -1698,6 +1699,651 @@ var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
         RefreshPolicy.OnStatusCodes(StatusCode.NotFound, StatusCode.Internal),
         ex => ex.Message.Contains("leader changed", StringComparison.OrdinalIgnoreCase)
     )));
+```
+
+---
+
+## 13. Internal Implementation Reference
+
+This section documents all internal components needed to implement the library from scratch.
+
+### 13.1 EndpointParser (Utility)
+
+```csharp
+namespace Raging.Grpc.LoadBalancing;
+
+/// <summary>
+/// Utility for parsing endpoint strings.
+/// </summary>
+public static class EndpointParser {
+    /// <summary>
+    /// Parse a single endpoint string.
+    /// </summary>
+    /// <param name="input">The endpoint string in "host:port" format.</param>
+    /// <returns>A DnsEndPoint representing the endpoint.</returns>
+    /// <exception cref="LoadBalancingConfigurationException">Thrown when the format is invalid.</exception>
+    public static DnsEndPoint Parse(string input) {
+        var trimmed = input.Trim();
+        var colonIndex = trimmed.LastIndexOf(':');
+
+        if (colonIndex <= 0 || colonIndex == trimmed.Length - 1)
+            throw new LoadBalancingConfigurationException(
+                $"Invalid endpoint format: '{input}'. Expected 'host:port'.");
+
+        var host = trimmed[..colonIndex];
+        var portStr = trimmed[(colonIndex + 1)..];
+
+        if (!int.TryParse(portStr, out var port) || port is <= 0 or > 65535)
+            throw new LoadBalancingConfigurationException(
+                $"Invalid port in endpoint: '{input}'.");
+
+        return new DnsEndPoint(host, port);
+    }
+}
+```
+
+---
+
+### 13.2 BackoffCalculator
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Calculates exponential backoff with jitter.
+/// </summary>
+internal static class BackoffCalculator {
+    /// <summary>
+    /// Calculate the backoff duration for a given attempt.
+    /// Formula: min(initial * 2^(attempt-1), max) ± 10% jitter
+    /// </summary>
+    /// <param name="attempt">The current attempt number (1-based).</param>
+    /// <param name="initial">The initial backoff duration.</param>
+    /// <param name="max">The maximum backoff duration.</param>
+    /// <returns>The calculated backoff duration with jitter.</returns>
+    public static TimeSpan Calculate(int attempt, TimeSpan initial, TimeSpan max) {
+        // Exponential: initial * 2^(attempt-1)
+        // Cap the exponent to avoid overflow
+        var exponent = Math.Min(attempt - 1, 30);
+        var exponentialTicks = initial.Ticks * (1L << exponent);
+
+        // Cap at max
+        var cappedTicks = Math.Min(exponentialTicks, max.Ticks);
+
+        // Add jitter: ±10%
+        var jitter = Random.Shared.NextDouble() * 0.2 - 0.1;
+        var jitteredTicks = (long)(cappedTicks * (1.0 + jitter));
+
+        // Ensure non-negative
+        return TimeSpan.FromTicks(Math.Max(0, jitteredTicks));
+    }
+}
+```
+
+---
+
+### 13.3 SeedChannelPool
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Manages a pool of channels to seed endpoints for topology discovery.
+/// Channels are created lazily and reused across discovery attempts.
+/// </summary>
+internal sealed class SeedChannelPool : IAsyncDisposable {
+    readonly ConcurrentDictionary<DnsEndPoint, GrpcChannel> _channels = new();
+    readonly GrpcChannelOptions? _channelOptions;
+    readonly ILogger _logger;
+    readonly bool _useTls;
+    bool _disposed;
+
+    /// <summary>
+    /// Creates a new seed channel pool.
+    /// </summary>
+    /// <param name="channelOptions">Options for created channels.</param>
+    /// <param name="useTls">Whether to use TLS (https) or plain HTTP/2 (http).</param>
+    /// <param name="logger">Logger instance.</param>
+    public SeedChannelPool(GrpcChannelOptions? channelOptions, bool useTls, ILogger logger);
+
+    /// <summary>
+    /// Gets or creates a channel to the specified endpoint.
+    /// Thread-safe, channels are cached and reused.
+    /// </summary>
+    /// <param name="endpoint">The endpoint to connect to.</param>
+    /// <returns>A GrpcChannel connected to the endpoint.</returns>
+    public GrpcChannel GetChannel(DnsEndPoint endpoint);
+
+    /// <summary>
+    /// Disposes all cached channels.
+    /// </summary>
+    public ValueTask DisposeAsync();
+}
+```
+
+---
+
+### 13.4 PollingToStreamingAdapter
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Adapts a polling topology source to a streaming interface.
+/// Implements retry with exponential backoff on transient failures.
+/// </summary>
+internal sealed class PollingToStreamingAdapter : IStreamingTopologySource {
+    readonly IPollingTopologySource _pollingSource;
+    readonly TimeSpan _delay;
+    readonly ResilienceOptions _resilience;
+    readonly ILogger? _logger;
+
+    /// <summary>
+    /// Creates a new adapter.
+    /// </summary>
+    /// <param name="pollingSource">The polling source to wrap.</param>
+    /// <param name="delay">Delay between successful polls.</param>
+    /// <param name="resilience">Resilience options for backoff configuration.</param>
+    /// <param name="logger">Optional logger.</param>
+    public PollingToStreamingAdapter(
+        IPollingTopologySource pollingSource,
+        TimeSpan delay,
+        ResilienceOptions resilience,
+        ILogger? logger = null);
+
+    /// <summary>
+    /// Subscribe to topology changes.
+    /// Polls at configured interval, retries with backoff on failure.
+    /// After MaxDiscoveryAttempts consecutive failures, throws to trigger seed failover.
+    /// </summary>
+    public IAsyncEnumerable<ClusterTopology> SubscribeAsync(
+        TopologyContext context,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Delegates comparison to the wrapped polling source.
+    /// </summary>
+    public int Compare(ClusterNode x, ClusterNode y);
+}
+```
+
+---
+
+### 13.5 ClusterResolver
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Custom resolver that discovers cluster topology and reports addresses to the load balancer.
+/// Iterates through seeds sequentially on failure. Stays connected to streaming source until it ends.
+/// </summary>
+internal sealed class ClusterResolver : Resolver, IAsyncDisposable {
+    readonly IStreamingTopologySource _topologySource;
+    readonly ImmutableArray<DnsEndPoint> _seeds;
+    readonly SeedChannelPool _channelPool;
+    readonly ResilienceOptions _resilience;
+    readonly ILogger _logger;
+
+    CancellationTokenSource? _cts;
+    Task? _subscriptionTask;
+    ClusterTopology _lastTopology;
+
+    /// <summary>
+    /// Creates a new cluster resolver.
+    /// </summary>
+    public ClusterResolver(
+        IStreamingTopologySource topologySource,
+        ImmutableArray<DnsEndPoint> seeds,
+        SeedChannelPool channelPool,
+        ResilienceOptions resilience,
+        ILogger logger);
+
+    /// <summary>
+    /// Called when the resolver is started. Begins the subscription loop.
+    /// </summary>
+    protected override void OnStarted();
+
+    /// <summary>
+    /// Refresh topology by cancelling current subscription and restarting.
+    /// Called by RefreshTriggerInterceptor when errors occur.
+    /// </summary>
+    public override void Refresh();
+
+    /// <summary>
+    /// Disposes the resolver and cancels any ongoing subscription.
+    /// </summary>
+    public ValueTask DisposeAsync();
+
+    // Internal: SubscribeLoopAsync - round-robin through seeds forever
+    // Internal: SubscribeToSeedAsync - subscribe to one seed, await foreach
+    // Internal: ValidateTopology - throws if empty or no eligible nodes
+    // Internal: BuildAddresses - sorts nodes, assigns order index, converts to BalancerAddress
+}
+```
+
+**Key Implementation Details:**
+
+```csharp
+// BuildAddresses: How the comparer order is preserved
+IReadOnlyList<BalancerAddress> BuildAddresses(ClusterTopology topology) {
+    // Filter eligible nodes
+    var eligible = new List<ClusterNode>();
+    foreach (var node in topology.Nodes)
+        if (node.IsEligible)
+            eligible.Add(node);
+
+    // Sort using topology source comparer - THIS IS THE PICKING ALGORITHM
+    eligible.Sort(_topologySource);
+
+    // Convert to addresses with order index from comparer
+    var addresses = new List<BalancerAddress>(eligible.Count);
+    for (var i = 0; i < eligible.Count; i++) {
+        var node = eligible[i];
+        var attributes = new BalancerAttributes {
+            { ClusterPicker.OrderIndexKey, i }  // Preserve comparer order
+        };
+        addresses.Add(new BalancerAddress(node.EndPoint.Host, node.EndPoint.Port, attributes));
+    }
+    return addresses;
+}
+```
+
+---
+
+### 13.6 ClusterResolverFactory
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Factory for creating cluster resolvers.
+/// Registered with gRPC's service provider to handle the "cluster" scheme.
+/// </summary>
+internal sealed class ClusterResolverFactory : ResolverFactory {
+    /// <summary>
+    /// The URI scheme this factory handles.
+    /// </summary>
+    public const string SchemeName = "cluster";
+
+    readonly IStreamingTopologySource _topologySource;
+    readonly ImmutableArray<DnsEndPoint> _seeds;
+    readonly ResilienceOptions _resilience;
+    readonly SeedChannelPool _channelPool;
+    readonly ILoggerFactory _loggerFactory;
+
+    /// <summary>
+    /// Creates a new resolver factory.
+    /// </summary>
+    public ClusterResolverFactory(
+        IStreamingTopologySource topologySource,
+        ImmutableArray<DnsEndPoint> seeds,
+        ResilienceOptions resilience,
+        SeedChannelPool channelPool,
+        ILoggerFactory? loggerFactory);
+
+    /// <inheritdoc />
+    public override string Name => SchemeName;
+
+    /// <inheritdoc />
+    public override Resolver Create(ResolverOptions options);
+}
+```
+
+---
+
+### 13.7 ClusterLoadBalancer
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Custom load balancer that manages subchannels and creates priority-aware pickers.
+/// Passes ALL subchannels to picker (does not filter or sort).
+/// </summary>
+internal sealed class ClusterLoadBalancer : LoadBalancer {
+    static readonly BalancerState FailureState = new(ConnectivityState.TransientFailure, new ClusterPicker([]));
+
+    readonly IChannelControlHelper _controller;
+    readonly ILogger _logger;
+    readonly List<Subchannel> _subchannels = [];
+    readonly object _lock = new();
+    bool _disposed;
+
+    /// <summary>
+    /// Creates a new cluster load balancer.
+    /// </summary>
+    /// <param name="controller">The channel control helper for creating subchannels.</param>
+    /// <param name="logger">Logger instance.</param>
+    public ClusterLoadBalancer(IChannelControlHelper controller, ILogger logger);
+
+    /// <summary>
+    /// Called when resolver reports new addresses.
+    /// Creates/removes subchannels to match the new address list.
+    /// </summary>
+    public override void UpdateChannelState(ChannelState state);
+
+    /// <summary>
+    /// Disposes all subchannels.
+    /// </summary>
+    protected override void Dispose(bool disposing);
+
+    // Internal: UpdateSubchannels - diff current vs new, add/remove as needed
+    // Internal: OnSubchannelStateChanged - reconnect on Idle, update picker on any change
+    // Internal: UpdatePicker - create new ClusterPicker with ALL subchannels
+}
+```
+
+**Key Implementation Details:**
+
+```csharp
+void UpdatePicker() {
+    // Determine overall connectivity state
+    var hasReady = false;
+    var hasConnecting = false;
+    foreach (var s in _subchannels) {
+        if (s.State == ConnectivityState.Ready) hasReady = true;
+        else if (s.State == ConnectivityState.Connecting) hasConnecting = true;
+    }
+
+    var connectivityState = hasReady
+        ? ConnectivityState.Ready
+        : hasConnecting
+            ? ConnectivityState.Connecting
+            : _subchannels.Count > 0
+                ? ConnectivityState.TransientFailure
+                : ConnectivityState.Idle;
+
+    // Pass ALL subchannels to picker - it decides what to do
+    var picker = new ClusterPicker(_subchannels);
+    _controller.UpdateState(new BalancerState(connectivityState, picker));
+}
+```
+
+---
+
+### 13.8 ClusterLoadBalancerFactory
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Factory for creating cluster load balancers.
+/// Registered with gRPC's service provider.
+/// </summary>
+internal sealed class ClusterLoadBalancerFactory : LoadBalancerFactory {
+    /// <summary>
+    /// The policy name used by this load balancer.
+    /// </summary>
+    public const string PolicyName = "cluster";
+
+    readonly ILoggerFactory _loggerFactory;
+
+    /// <summary>
+    /// Creates a new load balancer factory.
+    /// </summary>
+    /// <param name="loggerFactory">Logger factory instance.</param>
+    public ClusterLoadBalancerFactory(ILoggerFactory? loggerFactory = null);
+
+    /// <inheritdoc />
+    public override string Name => PolicyName;
+
+    /// <inheritdoc />
+    public override LoadBalancer Create(LoadBalancerOptions options);
+}
+```
+
+---
+
+### 13.9 ClusterPicker
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Zero-allocation subchannel picker that implements round-robin within sorted Ready subchannels.
+/// Sorts by order index (assigned by Resolver using topology source's IComparer).
+/// </summary>
+internal sealed class ClusterPicker : SubchannelPicker {
+    /// <summary>
+    /// Attribute key for storing order index (from topology source comparer).
+    /// </summary>
+    public const string OrderIndexKey = "cluster-node-order";
+
+    static readonly Status NoReadyNodesStatus =
+        new(StatusCode.Unavailable, "No ready nodes available in cluster.");
+
+    readonly Subchannel[] _readySubchannels;
+    int _roundRobinIndex;
+
+    /// <summary>
+    /// Creates a new picker with the specified subchannels.
+    /// Filters to Ready subchannels and sorts by order index.
+    /// </summary>
+    /// <param name="subchannels">All subchannels from the load balancer.</param>
+    public ClusterPicker(IReadOnlyList<Subchannel> subchannels) {
+        // Filter to Ready subchannels
+        var ready = new List<Subchannel>();
+        foreach (var s in subchannels)
+            if (s.State == ConnectivityState.Ready)
+                ready.Add(s);
+
+        if (ready.Count == 0) {
+            _readySubchannels = [];
+            return;
+        }
+
+        // Sort by order index (assigned by Resolver using topology source comparer)
+        ready.Sort((a, b) => GetOrderIndex(a).CompareTo(GetOrderIndex(b)));
+        _readySubchannels = [.. ready];
+    }
+
+    /// <summary>
+    /// Pick a subchannel for the request.
+    /// ZERO ALLOCATIONS - called on every gRPC call.
+    /// </summary>
+    public override PickResult Pick(PickContext context) {
+        if (_readySubchannels.Length == 0)
+            return PickResult.ForFailure(NoReadyNodesStatus);
+
+        var index = Interlocked.Increment(ref _roundRobinIndex);
+        var count = _readySubchannels.Length;
+        var selectedIndex = ((index % count) + count) % count;
+
+        return PickResult.ForSubchannel(_readySubchannels[selectedIndex]);
+    }
+
+    static int GetOrderIndex(Subchannel subchannel) {
+        if (subchannel.Attributes.TryGetValue(OrderIndexKey, out var value) && value is int order)
+            return order;
+        return int.MaxValue;
+    }
+}
+```
+
+---
+
+### 13.10 RefreshTriggerInterceptor
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Interceptor that triggers topology refresh on configurable RPC exceptions.
+/// Wraps all four gRPC call types: Unary, ClientStreaming, ServerStreaming, DuplexStreaming.
+/// </summary>
+internal sealed class RefreshTriggerInterceptor : Interceptor {
+    readonly ShouldRefreshTopology _policy;
+    readonly Action _triggerRefresh;
+    readonly ILogger _logger;
+
+    /// <summary>
+    /// Creates a new refresh trigger interceptor.
+    /// </summary>
+    /// <param name="policy">The policy that determines when to refresh.</param>
+    /// <param name="triggerRefresh">Action to call to trigger refresh.</param>
+    /// <param name="logger">Logger instance.</param>
+    public RefreshTriggerInterceptor(
+        ShouldRefreshTopology policy,
+        Action triggerRefresh,
+        ILogger logger);
+
+    /// <summary>
+    /// Intercept unary calls - wraps response task to catch RpcException.
+    /// </summary>
+    public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(...);
+
+    /// <summary>
+    /// Intercept client streaming calls - wraps response task.
+    /// </summary>
+    public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(...);
+
+    /// <summary>
+    /// Intercept server streaming calls - wraps response stream with RefreshTriggerStreamReader.
+    /// </summary>
+    public override AsyncServerStreamingCall<TResponse> AsyncServerStreamingCall<TRequest, TResponse>(...);
+
+    /// <summary>
+    /// Intercept duplex streaming calls - wraps response stream with RefreshTriggerStreamReader.
+    /// </summary>
+    public override AsyncDuplexStreamingCall<TRequest, TResponse> AsyncDuplexStreamingCall<TRequest, TResponse>(...);
+
+    // Internal: HandleResponse - awaits response, catches RpcException, checks policy
+    // Internal: CheckAndTriggerRefresh - if policy returns true, calls _triggerRefresh
+
+    /// <summary>
+    /// Stream reader wrapper that checks for refresh triggers on MoveNext.
+    /// </summary>
+    sealed class RefreshTriggerStreamReader<T> : IAsyncStreamReader<T> {
+        public T Current { get; }
+        public Task<bool> MoveNext(CancellationToken cancellationToken);
+    }
+}
+```
+
+---
+
+### 13.11 Exception Classes
+
+```csharp
+namespace Raging.Grpc.LoadBalancing;
+
+/// <summary>
+/// Base exception for load balancing errors.
+/// </summary>
+public abstract class LoadBalancingException : Exception {
+    protected LoadBalancingException(string message);
+    protected LoadBalancingException(string message, Exception innerException);
+}
+
+/// <summary>
+/// Configuration is invalid or incomplete.
+/// </summary>
+public sealed class LoadBalancingConfigurationException : LoadBalancingException {
+    public LoadBalancingConfigurationException(string message);
+}
+
+/// <summary>
+/// Failed to discover cluster topology after all attempts.
+/// </summary>
+public sealed class ClusterDiscoveryException : LoadBalancingException {
+    /// <summary>The number of discovery attempts made.</summary>
+    public int Attempts { get; }
+
+    /// <summary>The endpoints that were tried.</summary>
+    public ImmutableArray<DnsEndPoint> TriedEndpoints { get; }
+
+    /// <summary>The exceptions that occurred during discovery attempts.</summary>
+    public ImmutableArray<Exception> Exceptions { get; }
+
+    public ClusterDiscoveryException(
+        int attempts,
+        ImmutableArray<DnsEndPoint> triedEndpoints,
+        ImmutableArray<Exception> exceptions);
+}
+
+/// <summary>
+/// No eligible nodes available in the cluster.
+/// </summary>
+public sealed class NoEligibleNodesException : LoadBalancingException {
+    /// <summary>The total number of nodes in the cluster.</summary>
+    public int TotalNodes { get; }
+
+    public NoEligibleNodesException(int totalNodes);
+}
+
+/// <summary>
+/// Topology operation failed.
+/// </summary>
+public sealed class TopologyException : LoadBalancingException {
+    /// <summary>The endpoint where the topology operation failed.</summary>
+    public DnsEndPoint Endpoint { get; }
+
+    public TopologyException(DnsEndPoint endpoint, Exception innerException);
+}
+```
+
+---
+
+### 13.12 Log Messages (Source-Generated)
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Source-generated logging for load balancing operations.
+/// Uses [LoggerMessage] attribute for zero-allocation logging.
+/// </summary>
+internal static partial class Log {
+    // Discovery
+    [LoggerMessage(Level = LogLevel.Debug,
+        Message = "Discovering cluster from {Endpoint}")]
+    public static partial void DiscoveringCluster(this ILogger logger, DnsEndPoint endpoint);
+
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Discovered {NodeCount} nodes, {EligibleCount} eligible")]
+    public static partial void DiscoveredNodes(this ILogger logger, int nodeCount, int eligibleCount);
+
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Topology call to {Endpoint} failed")]
+    public static partial void TopologyCallFailed(this ILogger logger, DnsEndPoint endpoint, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Topology stream from {Endpoint} ended without returning any data")]
+    public static partial void TopologyStreamEmpty(this ILogger logger, DnsEndPoint endpoint);
+
+    // Topology changes
+    [LoggerMessage(Level = LogLevel.Information,
+        Message = "Topology changed: {AddedCount} added, {RemovedCount} removed")]
+    public static partial void TopologyChanged(this ILogger logger, int addedCount, int removedCount);
+
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "No eligible nodes in topology, total nodes: {TotalNodes}")]
+    public static partial void NoEligibleNodes(this ILogger logger, int totalNodes);
+
+    // Refresh
+    [LoggerMessage(Level = LogLevel.Debug,
+        Message = "Topology refresh triggered by status code {StatusCode}")]
+    public static partial void RefreshTriggered(this ILogger logger, StatusCode statusCode);
+
+    // Seed channel pool
+    [LoggerMessage(Level = LogLevel.Debug,
+        Message = "Creating seed channel to {Endpoint}")]
+    public static partial void CreatingSeedChannel(this ILogger logger, DnsEndPoint endpoint);
+
+    [LoggerMessage(Level = LogLevel.Debug,
+        Message = "Disposing seed channel pool with {ChannelCount} channels")]
+    public static partial void DisposingSeedChannelPool(this ILogger logger, int channelCount);
+
+    // Polling adapter backoff
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Polling failed (attempt {Attempt}), retrying after {Backoff}")]
+    public static partial void PollingFailedRetrying(this ILogger logger, int attempt, TimeSpan backoff, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Error,
+        Message = "Polling failed after {Attempts} attempts, giving up on this seed")]
+    public static partial void PollingMaxAttemptsExceeded(this ILogger logger, int attempts, Exception exception);
+}
 ```
 
 ---
