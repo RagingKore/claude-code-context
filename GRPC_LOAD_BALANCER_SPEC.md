@@ -174,7 +174,8 @@ Each component has a single, well-defined responsibility:
 | Component | Single Responsibility | Does NOT Do |
 |-----------|----------------------|-------------|
 | **TopologySource** | Discovers nodes, defines sort order | Connection management, picking |
-| **Resolver** | Converts topology → addresses | Connection management, sorting (delegates to source) |
+| **PollingToStreamingAdapter** | Wraps polling source, retry with backoff | Discovery logic, connection management |
+| **Resolver** | Converts topology → addresses (sorts using source's comparer) | Connection management |
 | **LoadBalancer** | Manages connections (subchannels) | Filtering, sorting, picking |
 | **Picker** | Selects connection for each request | Discovery, connection management |
 
@@ -229,7 +230,7 @@ public interface IStreamingTopologySource : IComparer<ClusterNode> {
 
 #### 3. PollingToStreamingAdapter
 
-**Responsibility:** Convert polling source to streaming interface.
+**Responsibility:** Convert polling source to streaming interface with resilient retry.
 
 ```csharp
 internal sealed class PollingToStreamingAdapter : IStreamingTopologySource
@@ -237,7 +238,10 @@ internal sealed class PollingToStreamingAdapter : IStreamingTopologySource
 
 **Key Points:**
 - Wraps `IPollingTopologySource`
-- Polls at configured interval, yields each result
+- Polls at configured interval (`Delay`), yields each result
+- On failure: exponential backoff retry (`InitialBackoff` → `MaxBackoff`)
+- After `MaxDiscoveryAttempts` consecutive failures: let exception propagate (triggers seed failover)
+- Success resets failure counter
 - Internal architecture is always streaming-based
 
 #### 4. ClusterResolver
@@ -497,6 +501,23 @@ public sealed class ResilienceOptions {
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
+    /// Maximum consecutive failures before giving up on a seed.
+    /// After this many failures, the adapter lets the exception propagate
+    /// so the resolver can try the next seed.
+    /// </summary>
+    public int MaxDiscoveryAttempts { get; set; } = 10;
+
+    /// <summary>
+    /// Initial backoff duration after a polling failure.
+    /// </summary>
+    public TimeSpan InitialBackoff { get; set; } = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// Maximum backoff duration (cap for exponential growth).
+    /// </summary>
+    public TimeSpan MaxBackoff { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// gRPC status codes that trigger topology refresh.
     /// </summary>
     public int[] RefreshOnStatusCodes { get; set; } = [14]; // Unavailable
@@ -512,6 +533,9 @@ public sealed class ResilienceOptions {
     "Delay": "00:00:30",
     "Resilience": {
       "Timeout": "00:00:05",
+      "MaxDiscoveryAttempts": 10,
+      "InitialBackoff": "00:00:00.100",
+      "MaxBackoff": "00:00:05",
       "RefreshOnStatusCodes": [14]
     }
   }
@@ -898,6 +922,44 @@ while (!ct.IsCancellationRequested) {
 }
 ```
 
+### Decision 9: Backoff in PollingToStreamingAdapter (Not Resolver)
+
+**Choice:** Exponential backoff retry is handled in `PollingToStreamingAdapter`, not in `ClusterResolver`.
+
+**Rationale:**
+- **Layered resilience**: Adapter handles transient failures within ONE seed; Resolver handles seed failover
+- **Separation of concerns**: Adapter knows about polling errors; Resolver knows about seed switching
+- **Configurable per-seed**: `MaxDiscoveryAttempts` failures before giving up on a seed
+
+**Implementation:**
+```csharp
+// In PollingToStreamingAdapter
+while (!ct.IsCancellationRequested) {
+    try {
+        topology = await _pollingSource.GetClusterAsync(context);
+        consecutiveFailures = 0;  // Reset on success
+    }
+    catch (Exception ex) {
+        consecutiveFailures++;
+
+        if (consecutiveFailures >= _resilience.MaxDiscoveryAttempts)
+            throw;  // Let resolver try next seed
+
+        var backoff = BackoffCalculator.Calculate(
+            consecutiveFailures,
+            _resilience.InitialBackoff,
+            _resilience.MaxBackoff);
+
+        await Task.Delay(backoff, ct);
+        continue;
+    }
+    yield return topology;
+    await Task.Delay(_delay, ct);
+}
+```
+
+**Backoff formula:** `min(InitialBackoff * 2^(attempt-1), MaxBackoff) ± 10% jitter`
+
 ---
 
 ## 9. Error Handling
@@ -917,9 +979,11 @@ public sealed class TopologyException : LoadBalancingException;
 
 | Scenario | Behavior |
 |----------|----------|
+| Polling fails (transient) | Exponential backoff retry (InitialBackoff → MaxBackoff) |
+| Polling fails (MaxDiscoveryAttempts reached) | Let exception propagate, try next seed |
 | Seed connection fails | Log, try next seed |
 | Stream ends without data | Log `TopologyStreamEmpty`, try next seed |
-| All seeds fail continuously | Keep trying (round-robin through seeds) |
+| All seeds fail continuously | Keep trying (round-robin through seeds forever) |
 | Topology returns no eligible nodes | Throw `NoEligibleNodesException` |
 | Topology returns empty | Throw `ClusterDiscoveryException` |
 | gRPC call fails with Unavailable | Trigger refresh via interceptor |
@@ -930,10 +994,24 @@ public sealed class TopologyException : LoadBalancingException;
 public delegate bool ShouldRefreshTopology(RpcException exception);
 
 public static class RefreshPolicy {
+    // Default: refresh on Unavailable status
     public static readonly ShouldRefreshTopology Default =
         static ex => ex.StatusCode == StatusCode.Unavailable;
 
+    // Refresh on specific status codes
     public static ShouldRefreshTopology OnStatusCodes(params StatusCode[] codes);
+
+    // Refresh on status codes as integers (for configuration)
+    public static ShouldRefreshTopology FromStatusCodeInts(params int[] statusCodes);
+
+    // Refresh when exception message contains specified strings
+    public static ShouldRefreshTopology OnMessageContains(params string[] triggers);
+
+    // Combine policies (refresh if ANY match)
+    public static ShouldRefreshTopology Any(params ShouldRefreshTopology[] policies);
+
+    // Combine policies (refresh if ALL match)
+    public static ShouldRefreshTopology All(params ShouldRefreshTopology[] policies);
 }
 ```
 

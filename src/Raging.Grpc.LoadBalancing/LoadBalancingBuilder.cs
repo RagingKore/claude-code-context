@@ -184,7 +184,11 @@ public sealed class LoadBalancingBuilder {
 
         // Create streaming topology source (wrap polling if needed)
         IStreamingTopologySource streamingSource = _streamingSource
-            ?? new PollingToStreamingAdapter(_pollingSource!, _delay);
+            ?? new PollingToStreamingAdapter(
+                _pollingSource!,
+                _delay,
+                _resilience,
+                loggerFactory?.CreateLogger<PollingToStreamingAdapter>());
 
         // Create resolver factory
         var resolverFactory = new ClusterResolverFactory(

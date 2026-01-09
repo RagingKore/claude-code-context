@@ -304,7 +304,11 @@ public sealed class LoadBalancingServiceBuilder {
                     throw new InvalidOperationException("Could not resolve polling topology source.");
                 }
 
-                streamingSource = new PollingToStreamingAdapter(pollingSource, delay);
+                streamingSource = new PollingToStreamingAdapter(
+                    pollingSource,
+                    delay,
+                    resilience,
+                    loggerFactory?.CreateLogger<PollingToStreamingAdapter>());
             }
 
             // Create resolver factory

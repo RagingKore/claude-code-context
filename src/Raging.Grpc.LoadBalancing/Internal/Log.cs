@@ -52,4 +52,14 @@ internal static partial class Log {
         Level = LogLevel.Warning,
         Message = "Topology stream from {Endpoint} ended without returning any data")]
     public static partial void TopologyStreamEmpty(this ILogger logger, DnsEndPoint endpoint);
+
+    [LoggerMessage(
+        Level = LogLevel.Warning,
+        Message = "Polling failed (attempt {Attempt}), retrying after {Backoff}")]
+    public static partial void PollingFailedRetrying(this ILogger logger, int attempt, TimeSpan backoff, Exception exception);
+
+    [LoggerMessage(
+        Level = LogLevel.Error,
+        Message = "Polling failed after {Attempts} attempts, giving up on this seed")]
+    public static partial void PollingMaxAttemptsExceeded(this ILogger logger, int attempts, Exception exception);
 }
