@@ -5,23 +5,20 @@ namespace Raging.Grpc.LoadBalancing.Internal;
 /// <summary>
 /// Adapts a polling topology source to a streaming interface.
 /// </summary>
-/// <typeparam name="TNode">The node type.</typeparam>
-internal sealed class PollingToStreamingAdapter<TNode> : IStreamingTopologySource<TNode>
-    where TNode : struct, IClusterNode {
-
-    readonly IPollingTopologySource<TNode> _pollingSource;
+internal sealed class PollingToStreamingAdapter : IStreamingTopologySource {
+    readonly IPollingTopologySource _pollingSource;
     readonly TimeSpan _delay;
 
     /// <summary>
     /// Creates a new adapter.
     /// </summary>
-    public PollingToStreamingAdapter(IPollingTopologySource<TNode> pollingSource, TimeSpan delay) {
+    public PollingToStreamingAdapter(IPollingTopologySource pollingSource, TimeSpan delay) {
         _pollingSource = pollingSource;
         _delay = delay;
     }
 
     /// <inheritdoc />
-    public async IAsyncEnumerable<ClusterTopology<TNode>> SubscribeAsync(
+    public async IAsyncEnumerable<ClusterTopology> SubscribeAsync(
         TopologyContext context,
         [EnumeratorCancellation] CancellationToken cancellationToken = default) {
 
@@ -29,7 +26,7 @@ internal sealed class PollingToStreamingAdapter<TNode> : IStreamingTopologySourc
         var ct = cts.Token;
 
         while (!ct.IsCancellationRequested) {
-            ClusterTopology<TNode> topology;
+            ClusterTopology topology;
 
             try {
                 topology = await _pollingSource
@@ -56,5 +53,5 @@ internal sealed class PollingToStreamingAdapter<TNode> : IStreamingTopologySourc
     }
 
     /// <inheritdoc />
-    public int Compare(TNode x, TNode y) => _pollingSource.Compare(x, y);
+    public int Compare(ClusterNode x, ClusterNode y) => _pollingSource.Compare(x, y);
 }

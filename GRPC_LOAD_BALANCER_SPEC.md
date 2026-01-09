@@ -27,11 +27,11 @@
 
 ## 1. Overview
 
-A generic, high-performance gRPC load balancer for .NET 8/9/10 that enables cluster-aware client-side load balancing through topology discovery.
+A high-performance gRPC load balancer for .NET 8/9/10 that enables cluster-aware client-side load balancing through topology discovery.
 
 ### Core Principle
 
-User implements **one interface** (`IPollingTopologySource<TNode>` or `IStreamingTopologySource<TNode>`), the library handles everything else:
+User implements **one interface** (`IPollingTopologySource` or `IStreamingTopologySource`), the library handles everything else:
 
 - Topology discovery from seed nodes
 - Node selection based on custom comparer (default: by Priority)
@@ -41,11 +41,12 @@ User implements **one interface** (`IPollingTopologySource<TNode>` or `IStreamin
 
 ### Key Features
 
+- **Non-Generic API**: Simple `ClusterNode` record struct with `Metadata` dictionary for extensibility
 - **Reactive Core**: Internal architecture is streaming-based; polling is adapted to streaming
 - **Zero-Allocation Hot Path**: `Pick()` method allocates nothing
 - **Flexible Configuration**: POCO options for JSON serialization + fluent builder
 - **DI Support**: Full integration with `IServiceCollection`
-- **Extensible**: Custom node selection order via `IComparer<TNode>` on topology source
+- **Extensible**: Custom node selection order via `IComparer<ClusterNode>` on topology source
 - **Separation of Concerns**: Each component has a single, well-defined responsibility
 
 ---
@@ -56,9 +57,10 @@ User implements **one interface** (`IPollingTopologySource<TNode>` or `IStreamin
 
 | Goal | Description |
 |------|-------------|
-| **Simplicity** | Single interface implementation for users |
+| **Simplicity** | Single interface implementation, no generics needed |
 | **Performance** | Zero allocations on pick hot path |
 | **Flexibility** | Support polling and streaming topology sources |
+| **Extensibility** | Metadata dictionary for custom node attributes |
 | **Integration** | Seamless integration with standard `GrpcChannel` patterns |
 | **Resilience** | Automatic retry with seed failover |
 | **Observability** | Source-generated logging |
@@ -123,9 +125,9 @@ In .NET gRPC, client-side load balancing consists of three components:
 │  ┌────────────────────────────────────────────────────────────────────────┐  │
 │  │                    Topology Source (User Implements)                    │  │
 │  │                                                                         │  │
-│  │  • IPollingTopologySource<TNode> - request/response discovery          │  │
-│  │  • IStreamingTopologySource<TNode> - server-push discovery             │  │
-│  │  • IComparer<TNode> - node selection order (THE PICKING ALGORITHM)     │  │
+│  │  • IPollingTopologySource - request/response discovery                 │  │
+│  │  • IStreamingTopologySource - server-push discovery                    │  │
+│  │  • IComparer<ClusterNode> - node selection order (THE PICKING ALGO)    │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
 │                                    │                                          │
 │                                    ▼                                          │
@@ -134,7 +136,7 @@ In .NET gRPC, client-side load balancing consists of three components:
 │  │                                                                         │  │
 │  │  • Subscribes to topology source                                       │  │
 │  │  • Iterates through seeds sequentially on failure                      │  │
-│  │  • Sorts nodes using topology source's IComparer<TNode>                │  │
+│  │  • Sorts nodes using topology source's IComparer<ClusterNode>          │  │
 │  │  • Assigns order index to preserve comparer's sort order               │  │
 │  │  • Passes addresses to LoadBalancer                                    │  │
 │  └────────────────────────────────────────────────────────────────────────┘  │
@@ -178,50 +180,72 @@ Each component has a single, well-defined responsibility:
 
 ### Component Details
 
-#### 1. IPollingTopologySource / IStreamingTopologySource
+#### 1. ClusterNode
+
+**The single node type used throughout the library.**
+
+```csharp
+public readonly record struct ClusterNode {
+    public required DnsEndPoint EndPoint { get; init; }
+    public bool IsEligible { get; init; } = true;
+    public int Priority { get; init; } = 0;
+    public ImmutableDictionary<string, object> Metadata { get; init; } = ImmutableDictionary<string, object>.Empty;
+
+    public T? GetMetadata<T>(string key);
+    public ClusterNode WithMetadata(string key, object value);
+}
+```
+
+**Key Points:**
+- Concrete record struct, not an interface
+- `Metadata` dictionary for custom attributes (datacenter, zone, version, etc.)
+- No generics needed - one type fits all use cases
+- Helper methods for metadata access
+
+#### 2. IPollingTopologySource / IStreamingTopologySource
 
 **Responsibility:** Discover cluster topology and define node selection order.
 
 ```csharp
-public interface IStreamingTopologySource<TNode> : IComparer<TNode>
-    where TNode : struct, IClusterNode {
-
+public interface IStreamingTopologySource : IComparer<ClusterNode> {
     // Discover topology
-    IAsyncEnumerable<ClusterTopology<TNode>> SubscribeAsync(
+    IAsyncEnumerable<ClusterTopology> SubscribeAsync(
         TopologyContext context,
         CancellationToken cancellationToken = default);
 
     // Define selection order (THE PICKING ALGORITHM)
     // Default: sort by Priority ascending
-    int IComparer<TNode>.Compare(TNode x, TNode y) => x.Priority.CompareTo(y.Priority);
+    int IComparer<ClusterNode>.Compare(ClusterNode x, ClusterNode y) =>
+        x.Priority.CompareTo(y.Priority);
 }
 ```
 
 **Key Points:**
 - User implements this interface
 - `SubscribeAsync` yields topology snapshots (streaming) or single snapshot (polling via adapter)
-- `IComparer<TNode>` determines node selection order - **this IS the picking algorithm**
+- `IComparer<ClusterNode>` determines node selection order - **this IS the picking algorithm**
 - Default comparer sorts by `Priority` ascending (lower = preferred)
+- Custom comparers can use `Metadata` for domain-specific sorting (datacenter, latency, etc.)
 
-#### 2. PollingToStreamingAdapter
+#### 3. PollingToStreamingAdapter
 
 **Responsibility:** Convert polling source to streaming interface.
 
 ```csharp
-internal sealed class PollingToStreamingAdapter<TNode> : IStreamingTopologySource<TNode>
+internal sealed class PollingToStreamingAdapter : IStreamingTopologySource
 ```
 
 **Key Points:**
-- Wraps `IPollingTopologySource<TNode>`
+- Wraps `IPollingTopologySource`
 - Polls at configured interval, yields each result
 - Internal architecture is always streaming-based
 
-#### 3. ClusterResolver
+#### 4. ClusterResolver
 
 **Responsibility:** Subscribe to topology, convert nodes to addresses with order index.
 
 ```csharp
-internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
+internal sealed class ClusterResolver : Resolver, IAsyncDisposable
 ```
 
 **Key Points:**
@@ -229,12 +253,12 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
 - Stays connected to streaming source "forever" until it ends
 - On topology update:
   1. Filters to eligible nodes
-  2. Sorts using `_topologySource` (IComparer<TNode>)
+  2. Sorts using topology source (IComparer<ClusterNode>)
   3. Assigns sequential order index (0, 1, 2...)
   4. Passes `BalancerAddress` list to LoadBalancer
 - **Does NOT manage connections**
 
-#### 4. ClusterLoadBalancer
+#### 5. ClusterLoadBalancer
 
 **Responsibility:** Manage subchannels (connections) to addresses.
 
@@ -249,7 +273,7 @@ internal sealed class ClusterLoadBalancer : LoadBalancer
 - **Does NOT filter or sort** - passes everything to Picker
 - **Does NOT pick** - that's the Picker's job
 
-#### 5. ClusterPicker
+#### 6. ClusterPicker
 
 **Responsibility:** Select which subchannel to use for each gRPC call.
 
@@ -267,7 +291,7 @@ internal sealed class ClusterPicker : SubchannelPicker
   2. Return `_readySubchannels[index % count]`
   3. **ZERO ALLOCATIONS**
 
-#### 6. SeedChannelPool
+#### 7. SeedChannelPool
 
 **Responsibility:** Manage reusable gRPC channels to seed nodes.
 
@@ -280,16 +304,16 @@ internal sealed class SeedChannelPool : IAsyncDisposable
 - Reuses channels across discovery attempts
 - Disposes all channels on shutdown
 
-#### 7. ClusterTopology
+#### 8. ClusterTopology
 
 **Responsibility:** Immutable snapshot of cluster nodes with cached computations.
 
 ```csharp
-public readonly record struct ClusterTopology<TNode>(ImmutableArray<TNode> Nodes)
+public readonly record struct ClusterTopology(ImmutableArray<ClusterNode> Nodes)
 ```
 
 **Key Points:**
-- Uses `ImmutableArray<TNode>` for value semantics
+- Uses `ImmutableArray<ClusterNode>` for value semantics
 - Caches hash code and eligible count at construction
 - Value equality based on node content (not reference)
 - `ComputeDiff()` method for change detection
@@ -298,29 +322,48 @@ public readonly record struct ClusterTopology<TNode>(ImmutableArray<TNode> Nodes
 
 ## 5. Contracts & Interfaces
 
-### IClusterNode
+### ClusterNode
 
 ```csharp
 /// <summary>
 /// Represents a node in the cluster.
 /// </summary>
-public interface IClusterNode {
+public readonly record struct ClusterNode {
     /// <summary>
     /// The endpoint to connect to.
     /// </summary>
-    DnsEndPoint EndPoint { get; }
+    public required DnsEndPoint EndPoint { get; init; }
 
     /// <summary>
     /// Whether this node can accept connections.
     /// Nodes with IsEligible=false are excluded from load balancing.
     /// </summary>
-    bool IsEligible { get; }
+    public bool IsEligible { get; init; } = true;
 
     /// <summary>
-    /// Selection priority. Used by default comparer.
-    /// Lower values are preferred.
+    /// Selection priority. Lower values are preferred.
+    /// Nodes with equal priority are load-balanced via round-robin.
     /// </summary>
-    int Priority { get; }
+    public int Priority { get; init; } = 0;
+
+    /// <summary>
+    /// Custom metadata for domain-specific node information.
+    /// Use this for datacenter, zone, version, or any other custom attributes.
+    /// </summary>
+    public ImmutableDictionary<string, object> Metadata { get; init; }
+        = ImmutableDictionary<string, object>.Empty;
+
+    /// <summary>
+    /// Gets a metadata value by key, or default if not found.
+    /// </summary>
+    public T? GetMetadata<T>(string key) =>
+        Metadata.TryGetValue(key, out var value) && value is T typed ? typed : default;
+
+    /// <summary>
+    /// Creates a new node with additional metadata.
+    /// </summary>
+    public ClusterNode WithMetadata(string key, object value) =>
+        this with { Metadata = Metadata.SetItem(key, value) };
 }
 ```
 
@@ -330,21 +373,18 @@ public interface IClusterNode {
 /// <summary>
 /// Immutable snapshot of cluster topology with cached computations.
 /// </summary>
-public readonly record struct ClusterTopology<TNode>(
-    ImmutableArray<TNode> Nodes
-) where TNode : struct, IClusterNode {
-
-    public static ClusterTopology<TNode> Empty => new(ImmutableArray<TNode>.Empty);
+public readonly record struct ClusterTopology(ImmutableArray<ClusterNode> Nodes) {
+    public static ClusterTopology Empty => new(ImmutableArray<ClusterNode>.Empty);
     public bool IsEmpty => Nodes.IsDefaultOrEmpty;
     public int Count => Nodes.IsDefaultOrEmpty ? 0 : Nodes.Length;
     public int EligibleCount { get; }  // Cached at construction
 
     // Value equality based on node content
-    public bool Equals(ClusterTopology<TNode> other);
+    public bool Equals(ClusterTopology other);
     public override int GetHashCode();  // Cached at construction
 
     // Change detection
-    public (int Added, int Removed) ComputeDiff(ClusterTopology<TNode> other);
+    public (int Added, int Removed) ComputeDiff(ClusterTopology other);
 }
 ```
 
@@ -384,20 +424,19 @@ public sealed record TopologyContext {
 /// Polling topology source. Implement for request/response discovery protocols.
 /// The library polls at the configured delay interval.
 /// </summary>
-public interface IPollingTopologySource<TNode> : IComparer<TNode>
-    where TNode : struct, IClusterNode {
-
+public interface IPollingTopologySource : IComparer<ClusterNode> {
     /// <summary>
     /// Fetch current cluster topology.
     /// </summary>
-    ValueTask<ClusterTopology<TNode>> GetClusterAsync(TopologyContext context);
+    ValueTask<ClusterTopology> GetClusterAsync(TopologyContext context);
 
     /// <summary>
     /// Node comparison for selection order. THE PICKING ALGORITHM.
     /// Default: sort by Priority ascending (lower = preferred).
     /// Override to customize (e.g., prefer same datacenter, least latency).
     /// </summary>
-    int IComparer<TNode>.Compare(TNode x, TNode y) => x.Priority.CompareTo(y.Priority);
+    int IComparer<ClusterNode>.Compare(ClusterNode x, ClusterNode y) =>
+        x.Priority.CompareTo(y.Priority);
 }
 ```
 
@@ -407,15 +446,13 @@ public interface IPollingTopologySource<TNode> : IComparer<TNode>
 /// <summary>
 /// Streaming topology source. Implement if server pushes topology changes.
 /// </summary>
-public interface IStreamingTopologySource<TNode> : IComparer<TNode>
-    where TNode : struct, IClusterNode {
-
+public interface IStreamingTopologySource : IComparer<ClusterNode> {
     /// <summary>
     /// Subscribe to cluster topology changes.
     /// Each yielded value is the complete current topology (snapshot model).
     /// The enumerable should yield continuously until cancelled.
     /// </summary>
-    IAsyncEnumerable<ClusterTopology<TNode>> SubscribeAsync(
+    IAsyncEnumerable<ClusterTopology> SubscribeAsync(
         TopologyContext context,
         CancellationToken cancellationToken = default);
 
@@ -424,7 +461,8 @@ public interface IStreamingTopologySource<TNode> : IComparer<TNode>
     /// Default: sort by Priority ascending (lower = preferred).
     /// Override to customize (e.g., prefer same datacenter, least latency).
     /// </summary>
-    int IComparer<TNode>.Compare(TNode x, TNode y) => x.Priority.CompareTo(y.Priority);
+    int IComparer<ClusterNode>.Compare(ClusterNode x, ClusterNode y) =>
+        x.Priority.CompareTo(y.Priority);
 }
 ```
 
@@ -483,8 +521,8 @@ public sealed class ResilienceOptions {
 ### Fluent Builder (Non-DI)
 
 ```csharp
-var channel = GrpcLoadBalancedChannel.ForAddress("node1:2113", lb => lb
-    .WithSeeds("node2:2113", "node3:2113")
+var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
+    .WithSeeds("node2:5000", "node3:5000")
     .WithPollingTopologySource(new MyTopologySource(), delay: TimeSpan.FromSeconds(30))
     .WithResilience(r => r.Timeout = TimeSpan.FromSeconds(3))
     .WithLoggerFactory(loggerFactory)
@@ -494,9 +532,9 @@ var channel = GrpcLoadBalancedChannel.ForAddress("node1:2113", lb => lb
 ### DI Registration
 
 ```csharp
-services.AddGrpcLoadBalancing("node1:2113")
-    .WithSeeds("node2:2113", "node3:2113")
-    .WithPollingTopologySource<MyNode, MyTopologySource>(delay: TimeSpan.FromSeconds(30))
+services.AddGrpcLoadBalancing("node1:5000")
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource<MyTopologySource>(delay: TimeSpan.FromSeconds(30))
     .Build();
 
 // Inject
@@ -547,7 +585,7 @@ sequenceDiagram
 
     Note over Resolver: Process topology
     Resolver->>Resolver: Filter eligible nodes
-    Resolver->>Resolver: Sort using IComparer<TNode>
+    Resolver->>Resolver: Sort using IComparer<ClusterNode>
     Resolver->>Resolver: Assign order index (0,1,2...)
 
     Resolver->>LB: UpdateChannelState(addresses)
@@ -701,7 +739,40 @@ sequenceDiagram
 
 ## 8. Design Decisions & Rationale
 
-### Decision 1: Separation of Concerns
+### Decision 1: Non-Generic API with Metadata Dictionary
+
+**Choice:** Use concrete `ClusterNode` record struct with `Metadata` dictionary instead of generic `TNode`.
+
+**Rationale:**
+- **Simplicity**: Users don't need to define their own node type
+- **No Generics**: Eliminates type parameter complexity throughout the codebase
+- **Extensibility**: `Metadata` dictionary allows arbitrary custom attributes
+- **Performance**: Hot path (`Pick()`) doesn't access metadata - only cold path (comparer)
+
+**Implementation:**
+```csharp
+// User stores custom data in Metadata
+var node = new ClusterNode {
+    EndPoint = new DnsEndPoint("host", 5000),
+    Priority = 1,
+    Metadata = ImmutableDictionary<string, object>.Empty
+        .Add("datacenter", "us-east-1")
+        .Add("version", "2.0.0")
+};
+
+// Custom comparer accesses metadata
+public int Compare(ClusterNode x, ClusterNode y) {
+    var xDc = x.GetMetadata<string>("datacenter") ?? "";
+    var yDc = y.GetMetadata<string>("datacenter") ?? "";
+    // Prefer same datacenter
+    var xLocal = xDc == _myDc ? 0 : 1;
+    var yLocal = yDc == _myDc ? 0 : 1;
+    if (xLocal != yLocal) return xLocal.CompareTo(yLocal);
+    return x.Priority.CompareTo(y.Priority);
+}
+```
+
+### Decision 2: Separation of Concerns
 
 **Choice:** Each component (Resolver, LoadBalancer, Picker) has a single responsibility.
 
@@ -717,41 +788,44 @@ sequenceDiagram
 | LoadBalancer | Manages connections | Filter, sort, pick |
 | Picker | Picks connection per request | Discover, manage connections |
 
-### Decision 2: Comparer on Topology Source
+### Decision 3: Comparer on Topology Source
 
-**Choice:** The `IComparer<TNode>` is defined on the topology source interface.
+**Choice:** The `IComparer<ClusterNode>` is defined on the topology source interface.
 
 **Rationale:**
 - The topology source knows the domain (node types, priorities, datacenters)
-- Custom sorting logic can use domain-specific fields
+- Custom sorting logic can use domain-specific fields in `Metadata`
 - Single place to define "which nodes are preferred"
 
 **Implementation:**
 ```csharp
 // Default: sort by Priority
-int IComparer<TNode>.Compare(TNode x, TNode y) => x.Priority.CompareTo(y.Priority);
+int IComparer<ClusterNode>.Compare(ClusterNode x, ClusterNode y) =>
+    x.Priority.CompareTo(y.Priority);
 
 // Custom: prefer same datacenter
-public int Compare(MyNode x, MyNode y) {
-    var xLocal = x.Datacenter == _myDc ? 0 : 1;
-    var yLocal = y.Datacenter == _myDc ? 0 : 1;
-    return xLocal != yLocal ? xLocal.CompareTo(yLocal) : x.Priority.CompareTo(y.Priority);
+public int Compare(ClusterNode x, ClusterNode y) {
+    var xLocal = x.GetMetadata<string>("datacenter") == _myDc ? 0 : 1;
+    var yLocal = y.GetMetadata<string>("datacenter") == _myDc ? 0 : 1;
+    return xLocal != yLocal
+        ? xLocal.CompareTo(yLocal)
+        : x.Priority.CompareTo(y.Priority);
 }
 ```
 
-### Decision 3: Order Index Instead of Direct Comparer in Picker
+### Decision 4: Order Index Instead of Direct Comparer in Picker
 
 **Choice:** Resolver sorts and assigns order index; Picker sorts by index.
 
 **Rationale:**
-- Picker only has `Subchannel` objects, not `TNode` objects
+- Picker only has `Subchannel` objects, not `ClusterNode` objects
 - Order index preserves comparer's sort order across the boundary
 - Simple integer comparison in Picker (fast)
 
 **Implementation:**
 ```csharp
 // In Resolver
-eligible.Sort(_topologySource);  // Uses IComparer<TNode>
+eligible.Sort(_topologySource);  // Uses IComparer<ClusterNode>
 for (var i = 0; i < eligible.Count; i++) {
     attributes.Add(OrderIndexKey, i);  // Preserve order
 }
@@ -760,7 +834,7 @@ for (var i = 0; i < eligible.Count; i++) {
 ready.Sort((a, b) => GetOrderIndex(a).CompareTo(GetOrderIndex(b)));
 ```
 
-### Decision 4: LoadBalancer Passes ALL Subchannels
+### Decision 5: LoadBalancer Passes ALL Subchannels
 
 **Choice:** LoadBalancer passes all subchannels to Picker, not just Ready ones.
 
@@ -769,7 +843,7 @@ ready.Sort((a, b) => GetOrderIndex(a).CompareTo(GetOrderIndex(b)));
 - **Flexibility**: Picker could implement more sophisticated logic (e.g., prefer Connecting over none)
 - **Immutability**: New Picker is created on state change; it sees snapshot of all subchannels
 
-### Decision 5: Sequential Seed Iteration (Not Parallel)
+### Decision 6: Sequential Seed Iteration (Not Parallel)
 
 **Choice:** On failure, try seeds one at a time in round-robin order.
 
@@ -778,9 +852,9 @@ ready.Sort((a, b) => GetOrderIndex(a).CompareTo(GetOrderIndex(b)));
 - **Efficiency**: No need to cancel parallel tasks
 - **Streaming model**: Stay connected to one seed's stream; only switch on failure
 
-### Decision 6: ClusterTopology as Value Object
+### Decision 7: ClusterTopology as Value Object
 
-**Choice:** `ClusterTopology<TNode>` is a record struct with value equality.
+**Choice:** `ClusterTopology` is a record struct with value equality.
 
 **Rationale:**
 - **Comparison**: Can check `if (oldTopology != newTopology)` efficiently
@@ -789,11 +863,11 @@ ready.Sort((a, b) => GetOrderIndex(a).CompareTo(GetOrderIndex(b)));
 
 **Implementation:**
 ```csharp
-public readonly record struct ClusterTopology<TNode>(ImmutableArray<TNode> Nodes) {
+public readonly record struct ClusterTopology(ImmutableArray<ClusterNode> Nodes) {
     readonly int _cachedHashCode;
     readonly int _eligibleCount;
 
-    public ClusterTopology(ImmutableArray<TNode> nodes) : this() {
+    public ClusterTopology(ImmutableArray<ClusterNode> nodes) : this() {
         Nodes = nodes;
         _cachedHashCode = ComputeHashCode(nodes);
         _eligibleCount = CountEligible(nodes);
@@ -801,7 +875,7 @@ public readonly record struct ClusterTopology<TNode>(ImmutableArray<TNode> Nodes
 }
 ```
 
-### Decision 7: Streaming-First Internal Architecture
+### Decision 8: Streaming-First Internal Architecture
 
 **Choice:** Everything internally is streaming-based; polling is adapted.
 
@@ -909,6 +983,14 @@ public ClusterPicker(IReadOnlyList<Subchannel> subchannels) {
 }
 ```
 
+### Metadata Performance
+
+The `Metadata` dictionary is only accessed in:
+- Topology source constructor (startup, cold)
+- Custom comparer (topology update, cold)
+
+**Never accessed on hot path** - so dictionary lookup overhead doesn't affect performance.
+
 ### ConfigureAwait(false)
 
 All async methods use `ConfigureAwait(false)`:
@@ -930,11 +1012,11 @@ src/Raging.Grpc.LoadBalancing/
 ├── LoadBalancingBuilder.cs                 # Non-DI builder
 │
 ├── Abstractions/
-│   ├── IClusterNode.cs                     # Node interface
+│   ├── ClusterNode.cs                      # Concrete node type with Metadata
+│   ├── ClusterTopology.cs                  # Topology value object
 │   ├── IPollingTopologySource.cs           # Polling source interface
 │   ├── IStreamingTopologySource.cs         # Streaming source interface
-│   ├── TopologyContext.cs                  # Context record
-│   └── ClusterTopology.cs                  # Topology value object
+│   └── TopologyContext.cs                  # Context record
 │
 ├── Configuration/
 │   ├── LoadBalancingOptions.cs             # POCO options
@@ -959,8 +1041,10 @@ src/Raging.Grpc.LoadBalancing/
 │   ├── RefreshTriggerInterceptor.cs        # Triggers refresh on error
 │   ├── SeedChannelPool.cs                  # Reusable seed channels
 │   ├── BackoffCalculator.cs                # Exponential backoff
-│   ├── EndpointParser.cs                   # "host:port" parsing
 │   └── Log.cs                              # Source-generated logging
+│
+├── Utilities/
+│   └── EndpointParser.cs                   # "host:port" parsing
 │
 └── Extensions/
     ├── ServiceCollectionExtensions.cs      # DI registration
@@ -974,17 +1058,9 @@ src/Raging.Grpc.LoadBalancing/
 ### Example 1: Simple Polling Source
 
 ```csharp
-// Define node type
-public readonly record struct MyNode(
-    DnsEndPoint EndPoint,
-    bool IsEligible,
-    int Priority
-) : IClusterNode;
-
 // Implement topology source (uses default comparer - by Priority)
-public sealed class MyTopologySource : IPollingTopologySource<MyNode> {
-
-    public async ValueTask<ClusterTopology<MyNode>> GetClusterAsync(TopologyContext context) {
+public sealed class MyTopologySource : IPollingTopologySource {
+    public async ValueTask<ClusterTopology> GetClusterAsync(TopologyContext context) {
         var client = new ClusterService.ClusterServiceClient(context.Channel);
 
         var response = await client.GetNodesAsync(
@@ -992,13 +1068,14 @@ public sealed class MyTopologySource : IPollingTopologySource<MyNode> {
             cancellationToken: context.CancellationToken);
 
         var nodes = response.Nodes
-            .Select(n => new MyNode(
-                EndPoint: new DnsEndPoint(n.Host, n.Port),
-                IsEligible: n.Status == NodeStatus.Ready,
-                Priority: n.IsLeader ? 0 : 1))
+            .Select(n => new ClusterNode {
+                EndPoint = new DnsEndPoint(n.Host, n.Port),
+                IsEligible = n.Status == NodeStatus.Ready,
+                Priority = n.IsLeader ? 0 : 1
+            })
             .ToImmutableArray();
 
-        return new ClusterTopology<MyNode>(nodes);
+        return new ClusterTopology(nodes);
     }
 }
 
@@ -1014,26 +1091,36 @@ await client.DoSomethingAsync(request);
 ### Example 2: Custom Comparer (Datacenter Affinity)
 
 ```csharp
-public readonly record struct MyNode(
-    DnsEndPoint EndPoint,
-    bool IsEligible,
-    int Priority,
-    string Datacenter
-) : IClusterNode;
-
-public sealed class DatacenterAwareSource : IPollingTopologySource<MyNode> {
+public sealed class DatacenterAwareSource : IPollingTopologySource {
     readonly string _preferredDc;
 
     public DatacenterAwareSource(string preferredDc) => _preferredDc = preferredDc;
 
-    public async ValueTask<ClusterTopology<MyNode>> GetClusterAsync(TopologyContext context) {
-        // ... fetch nodes
+    public async ValueTask<ClusterTopology> GetClusterAsync(TopologyContext context) {
+        var client = new ClusterService.ClusterServiceClient(context.Channel);
+        var response = await client.GetNodesAsync(new GetNodesRequest(),
+            cancellationToken: context.CancellationToken);
+
+        var nodes = response.Nodes
+            .Select(n => new ClusterNode {
+                EndPoint = new DnsEndPoint(n.Host, n.Port),
+                IsEligible = n.Status == NodeStatus.Ready,
+                Priority = n.IsLeader ? 0 : 1,
+                Metadata = ImmutableDictionary<string, object>.Empty
+                    .Add("datacenter", n.Datacenter)
+            })
+            .ToImmutableArray();
+
+        return new ClusterTopology(nodes);
     }
 
     // Custom comparer: prefer same datacenter, then by priority
-    public int Compare(MyNode x, MyNode y) {
-        var xLocal = x.Datacenter == _preferredDc ? 0 : 1;
-        var yLocal = y.Datacenter == _preferredDc ? 0 : 1;
+    public int Compare(ClusterNode x, ClusterNode y) {
+        var xDc = x.GetMetadata<string>("datacenter") ?? "";
+        var yDc = y.GetMetadata<string>("datacenter") ?? "";
+
+        var xLocal = xDc == _preferredDc ? 0 : 1;
+        var yLocal = yDc == _preferredDc ? 0 : 1;
 
         if (xLocal != yLocal)
             return xLocal.CompareTo(yLocal);
@@ -1051,9 +1138,8 @@ var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
 ### Example 3: Streaming Source (Server Push)
 
 ```csharp
-public sealed class StreamingTopologySource : IStreamingTopologySource<MyNode> {
-
-    public async IAsyncEnumerable<ClusterTopology<MyNode>> SubscribeAsync(
+public sealed class StreamingTopologySource : IStreamingTopologySource {
+    public async IAsyncEnumerable<ClusterTopology> SubscribeAsync(
         TopologyContext context,
         [EnumeratorCancellation] CancellationToken cancellationToken = default) {
 
@@ -1065,10 +1151,14 @@ public sealed class StreamingTopologySource : IStreamingTopologySource<MyNode> {
 
         await foreach (var update in stream.ResponseStream.ReadAllAsync(cancellationToken)) {
             var nodes = update.Nodes
-                .Select(n => new MyNode(...))
+                .Select(n => new ClusterNode {
+                    EndPoint = new DnsEndPoint(n.Host, n.Port),
+                    IsEligible = n.Status == NodeStatus.Ready,
+                    Priority = n.IsLeader ? 0 : 1
+                })
                 .ToImmutableArray();
 
-            yield return new ClusterTopology<MyNode>(nodes);
+            yield return new ClusterTopology(nodes);
         }
     }
 }
@@ -1085,10 +1175,10 @@ var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
 // Register with factory for DI
 services.AddGrpcLoadBalancing("node1:5000")
     .WithSeeds("node2:5000", "node3:5000")
-    .WithPollingTopologySource<MyNode>(sp => {
+    .WithPollingTopologySource(sp => {
         var config = sp.GetRequiredService<IOptions<MyConfig>>().Value;
         var logger = sp.GetRequiredService<ILogger<MyTopologySource>>();
-        return new MyTopologySource(config, logger);
+        return new DatacenterAwareSource(config.PreferredDatacenter);
     })
     .ConfigureChannel(opts => {
         opts.Credentials = ChannelCredentials.SecureSsl;
@@ -1126,9 +1216,10 @@ var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
 
 This load balancer provides:
 
-- **Simple API**: Implement one interface, get full load balancing
+- **Simple API**: Implement one interface, no generics needed
 - **Clear Separation**: Resolver discovers, LoadBalancer connects, Picker selects
 - **High Performance**: Zero allocations on hot path
+- **Flexible Extension**: Metadata dictionary for custom node attributes
 - **Flexible Selection**: Custom comparer for any selection logic
 - **Resilient**: Automatic seed failover, refresh on errors
 - **Observable**: Source-generated structured logging

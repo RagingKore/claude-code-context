@@ -15,10 +15,9 @@ public sealed class LoadBalancingBuilder {
     readonly List<DnsEndPoint> _seeds = [];
     ResilienceOptions _resilience = new();
 
-    object? _topologySource;
-    Type? _nodeType;
-    bool _isStreaming;
-    TimeSpan? _delay;
+    IStreamingTopologySource? _streamingSource;
+    IPollingTopologySource? _pollingSource;
+    TimeSpan _delay = TimeSpan.FromSeconds(30);
 
     ShouldRefreshTopology? _refreshPolicy;
     ILoggerFactory? _loggerFactory;
@@ -77,14 +76,12 @@ public sealed class LoadBalancingBuilder {
     /// </summary>
     /// <param name="source">The topology source instance.</param>
     /// <param name="delay">Delay between polls. Default: 30 seconds.</param>
-    public LoadBalancingBuilder WithPollingTopologySource<TNode>(
-        IPollingTopologySource<TNode> source,
-        TimeSpan? delay = null)
-        where TNode : struct, IClusterNode {
+    public LoadBalancingBuilder WithPollingTopologySource(
+        IPollingTopologySource source,
+        TimeSpan? delay = null) {
 
-        _topologySource = source;
-        _nodeType = typeof(TNode);
-        _isStreaming = false;
+        _pollingSource = source;
+        _streamingSource = null;
         _delay = delay ?? TimeSpan.FromSeconds(30);
 
         return this;
@@ -93,14 +90,9 @@ public sealed class LoadBalancingBuilder {
     /// <summary>
     /// Use a streaming topology source.
     /// </summary>
-    public LoadBalancingBuilder WithStreamingTopologySource<TNode>(
-        IStreamingTopologySource<TNode> source)
-        where TNode : struct, IClusterNode {
-
-        _topologySource = source;
-        _nodeType = typeof(TNode);
-        _isStreaming = true;
-        _delay = null;
+    public LoadBalancingBuilder WithStreamingTopologySource(IStreamingTopologySource source) {
+        _streamingSource = source;
+        _pollingSource = null;
 
         return this;
     }
@@ -158,7 +150,7 @@ public sealed class LoadBalancingBuilder {
     /// </summary>
     internal GrpcChannel Build(DnsEndPoint primaryEndpoint) {
         // Validate configuration
-        if (_topologySource is null || _nodeType is null) {
+        if (_pollingSource is null && _streamingSource is null) {
             throw new LoadBalancingConfigurationException(
                 "Topology source must be configured. Call WithPollingTopologySource or WithStreamingTopologySource.");
         }
@@ -177,15 +169,6 @@ public sealed class LoadBalancingBuilder {
                 "At least one seed endpoint must be configured.");
         }
 
-        // Build using reflection to call the generic method
-        var method = typeof(LoadBalancingBuilder)
-            .GetMethod(nameof(BuildGeneric), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-            .MakeGenericMethod(_nodeType);
-
-        return (GrpcChannel)method.Invoke(this, [allSeeds])!;
-    }
-
-    GrpcChannel BuildGeneric<TNode>(List<DnsEndPoint> seeds) where TNode : struct, IClusterNode {
         var loggerFactory = _loggerFactory;
         var logger = loggerFactory?.CreateLogger<SeedChannelPool>();
 
@@ -200,20 +183,13 @@ public sealed class LoadBalancingBuilder {
             logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
         // Create streaming topology source (wrap polling if needed)
-        IStreamingTopologySource<TNode> streamingSource;
-
-        if (_isStreaming) {
-            streamingSource = (IStreamingTopologySource<TNode>)_topologySource!;
-        }
-        else {
-            var pollingSource = (IPollingTopologySource<TNode>)_topologySource!;
-            streamingSource = new PollingToStreamingAdapter<TNode>(pollingSource, _delay ?? TimeSpan.FromSeconds(30));
-        }
+        IStreamingTopologySource streamingSource = _streamingSource
+            ?? new PollingToStreamingAdapter(_pollingSource!, _delay);
 
         // Create resolver factory
-        var resolverFactory = new ClusterResolverFactory<TNode>(
+        var resolverFactory = new ClusterResolverFactory(
             streamingSource,
-            [.. seeds],
+            [.. allSeeds],
             _resilience,
             seedChannelPool,
             loggerFactory);
@@ -237,14 +213,10 @@ public sealed class LoadBalancingBuilder {
         // Get refresh policy
         var refreshPolicy = _refreshPolicy ?? RefreshPolicy.Default;
 
-        // We need a reference to the resolver to trigger refresh
-        // This is a bit tricky - we'll use a wrapper that gets set after channel creation
-        Action? triggerRefresh = null;
-
         // Add refresh trigger interceptor
         var interceptor = new RefreshTriggerInterceptor(
             refreshPolicy,
-            () => triggerRefresh?.Invoke(),
+            () => { }, // Refresh is handled by load balancer infrastructure
             loggerFactory?.CreateLogger<RefreshTriggerInterceptor>()
                 ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<RefreshTriggerInterceptor>.Instance);
 
@@ -254,11 +226,6 @@ public sealed class LoadBalancingBuilder {
 
         // Create channel with custom scheme
         var channelId = Guid.NewGuid();
-        var channel = GrpcChannel.ForAddress($"cluster:///{channelId}", channelOptions);
-
-        // Unfortunately we can't easily get the resolver reference from the channel
-        // The refresh will be handled by the load balancer infrastructure detecting failures
-
-        return channel;
+        return GrpcChannel.ForAddress($"cluster:///{channelId}", channelOptions);
     }
 }

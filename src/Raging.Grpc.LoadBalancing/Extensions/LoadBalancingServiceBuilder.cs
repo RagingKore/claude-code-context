@@ -17,13 +17,13 @@ public sealed class LoadBalancingServiceBuilder {
     readonly List<DnsEndPoint> _seeds = [];
     ResilienceOptions _resilience = new();
 
-    // Type registration info
+    // Topology source configuration
     Type? _topologySourceType;
-    Type? _nodeType;
     object? _topologySourceInstance;
-    Func<IServiceProvider, object>? _topologySourceFactory;
+    Func<IServiceProvider, IStreamingTopologySource>? _streamingSourceFactory;
+    Func<IServiceProvider, IPollingTopologySource>? _pollingSourceFactory;
     bool _isStreaming;
-    TimeSpan? _delay;
+    TimeSpan _delay = TimeSpan.FromSeconds(30);
 
     ShouldRefreshTopology? _refreshPolicy;
     Action<GrpcChannelOptions>? _configureChannel;
@@ -81,23 +81,21 @@ public sealed class LoadBalancingServiceBuilder {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // POLLING TOPOLOGY SOURCE (3 overloads)
+    // POLLING TOPOLOGY SOURCE
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
     /// Register topology source type for DI resolution.
     /// </summary>
-    public LoadBalancingServiceBuilder WithPollingTopologySource<TNode, TSource>(
-        TimeSpan? delay = null)
-        where TNode : struct, IClusterNode
-        where TSource : class, IPollingTopologySource<TNode> {
+    public LoadBalancingServiceBuilder WithPollingTopologySource<TSource>(TimeSpan? delay = null)
+        where TSource : class, IPollingTopologySource {
 
         _topologySourceType = typeof(TSource);
-        _nodeType = typeof(TNode);
         _isStreaming = false;
         _delay = delay ?? TimeSpan.FromSeconds(30);
         _topologySourceInstance = null;
-        _topologySourceFactory = null;
+        _pollingSourceFactory = null;
+        _streamingSourceFactory = null;
 
         return this;
     }
@@ -105,17 +103,16 @@ public sealed class LoadBalancingServiceBuilder {
     /// <summary>
     /// Use topology source instance.
     /// </summary>
-    public LoadBalancingServiceBuilder WithPollingTopologySource<TNode>(
-        IPollingTopologySource<TNode> source,
-        TimeSpan? delay = null)
-        where TNode : struct, IClusterNode {
+    public LoadBalancingServiceBuilder WithPollingTopologySource(
+        IPollingTopologySource source,
+        TimeSpan? delay = null) {
 
         _topologySourceInstance = source;
-        _nodeType = typeof(TNode);
         _isStreaming = false;
         _delay = delay ?? TimeSpan.FromSeconds(30);
         _topologySourceType = null;
-        _topologySourceFactory = null;
+        _pollingSourceFactory = null;
+        _streamingSourceFactory = null;
 
         return this;
     }
@@ -123,38 +120,35 @@ public sealed class LoadBalancingServiceBuilder {
     /// <summary>
     /// Use factory for topology source creation.
     /// </summary>
-    public LoadBalancingServiceBuilder WithPollingTopologySource<TNode>(
-        Func<IServiceProvider, IPollingTopologySource<TNode>> factory,
-        TimeSpan? delay = null)
-        where TNode : struct, IClusterNode {
+    public LoadBalancingServiceBuilder WithPollingTopologySource(
+        Func<IServiceProvider, IPollingTopologySource> factory,
+        TimeSpan? delay = null) {
 
-        _topologySourceFactory = sp => factory(sp);
-        _nodeType = typeof(TNode);
+        _pollingSourceFactory = factory;
         _isStreaming = false;
         _delay = delay ?? TimeSpan.FromSeconds(30);
         _topologySourceType = null;
         _topologySourceInstance = null;
+        _streamingSourceFactory = null;
 
         return this;
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // STREAMING TOPOLOGY SOURCE (3 overloads)
+    // STREAMING TOPOLOGY SOURCE
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
     /// Register streaming topology source type for DI resolution.
     /// </summary>
-    public LoadBalancingServiceBuilder WithStreamingTopologySource<TNode, TSource>()
-        where TNode : struct, IClusterNode
-        where TSource : class, IStreamingTopologySource<TNode> {
+    public LoadBalancingServiceBuilder WithStreamingTopologySource<TSource>()
+        where TSource : class, IStreamingTopologySource {
 
         _topologySourceType = typeof(TSource);
-        _nodeType = typeof(TNode);
         _isStreaming = true;
-        _delay = null;
         _topologySourceInstance = null;
-        _topologySourceFactory = null;
+        _pollingSourceFactory = null;
+        _streamingSourceFactory = null;
 
         return this;
     }
@@ -162,16 +156,12 @@ public sealed class LoadBalancingServiceBuilder {
     /// <summary>
     /// Use streaming topology source instance.
     /// </summary>
-    public LoadBalancingServiceBuilder WithStreamingTopologySource<TNode>(
-        IStreamingTopologySource<TNode> source)
-        where TNode : struct, IClusterNode {
-
+    public LoadBalancingServiceBuilder WithStreamingTopologySource(IStreamingTopologySource source) {
         _topologySourceInstance = source;
-        _nodeType = typeof(TNode);
         _isStreaming = true;
-        _delay = null;
         _topologySourceType = null;
-        _topologySourceFactory = null;
+        _pollingSourceFactory = null;
+        _streamingSourceFactory = null;
 
         return this;
     }
@@ -179,16 +169,14 @@ public sealed class LoadBalancingServiceBuilder {
     /// <summary>
     /// Use factory for streaming topology source creation.
     /// </summary>
-    public LoadBalancingServiceBuilder WithStreamingTopologySource<TNode>(
-        Func<IServiceProvider, IStreamingTopologySource<TNode>> factory)
-        where TNode : struct, IClusterNode {
+    public LoadBalancingServiceBuilder WithStreamingTopologySource(
+        Func<IServiceProvider, IStreamingTopologySource> factory) {
 
-        _topologySourceFactory = sp => factory(sp);
-        _nodeType = typeof(TNode);
+        _streamingSourceFactory = factory;
         _isStreaming = true;
-        _delay = null;
         _topologySourceType = null;
         _topologySourceInstance = null;
+        _pollingSourceFactory = null;
 
         return this;
     }
@@ -230,7 +218,8 @@ public sealed class LoadBalancingServiceBuilder {
     /// </summary>
     public IServiceCollection Build() {
         // Validate configuration
-        if (_nodeType is null) {
+        if (_topologySourceType is null && _topologySourceInstance is null
+            && _pollingSourceFactory is null && _streamingSourceFactory is null) {
             throw new LoadBalancingConfigurationException(
                 "Topology source must be configured. Call WithPollingTopologySource or WithStreamingTopologySource.");
         }
@@ -250,15 +239,15 @@ public sealed class LoadBalancingServiceBuilder {
         // Capture configuration for the factory
         var seeds = allSeeds.ToArray();
         var resilience = _resilience;
-        var delay = _delay ?? TimeSpan.FromSeconds(30);
+        var delay = _delay;
         var refreshPolicy = _refreshPolicy ?? RefreshPolicy.Default;
         var configureChannel = _configureChannel;
         var useTls = _useTls;
         var isStreaming = _isStreaming;
-        var nodeType = _nodeType;
         var topologySourceType = _topologySourceType;
         var topologySourceInstance = _topologySourceInstance;
-        var topologySourceFactory = _topologySourceFactory;
+        var pollingSourceFactory = _pollingSourceFactory;
+        var streamingSourceFactory = _streamingSourceFactory;
 
         // Register topology source type if needed
         if (topologySourceType is not null) {
@@ -267,130 +256,97 @@ public sealed class LoadBalancingServiceBuilder {
 
         // Register the channel factory
         _services.AddSingleton(sp => {
-            var method = typeof(LoadBalancingServiceBuilder)
-                .GetMethod(nameof(CreateChannelGeneric), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
-                .MakeGenericMethod(nodeType);
+            var loggerFactory = sp.GetService<ILoggerFactory>();
+            var logger = loggerFactory?.CreateLogger<SeedChannelPool>();
 
-            return (GrpcChannel)method.Invoke(null, [
-                sp,
-                seeds,
-                resilience,
-                delay,
-                refreshPolicy,
-                configureChannel,
+            // Create channel options for seed channels
+            var seedChannelOptions = new GrpcChannelOptions();
+            configureChannel?.Invoke(seedChannelOptions);
+
+            // Create seed channel pool
+            var seedChannelPool = new SeedChannelPool(
+                seedChannelOptions,
                 useTls,
-                isStreaming,
-                topologySourceType,
-                topologySourceInstance,
-                topologySourceFactory
-            ])!;
+                logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+            // Get or create topology source
+            IStreamingTopologySource streamingSource;
+
+            if (isStreaming) {
+                IStreamingTopologySource? source = null;
+
+                if (topologySourceInstance is IStreamingTopologySource instance) {
+                    source = instance;
+                }
+                else if (streamingSourceFactory is not null) {
+                    source = streamingSourceFactory(sp);
+                }
+                else if (topologySourceType is not null) {
+                    source = (IStreamingTopologySource)sp.GetRequiredService(topologySourceType);
+                }
+
+                streamingSource = source ?? throw new InvalidOperationException("Could not resolve streaming topology source.");
+            }
+            else {
+                IPollingTopologySource? pollingSource = null;
+
+                if (topologySourceInstance is IPollingTopologySource instance) {
+                    pollingSource = instance;
+                }
+                else if (pollingSourceFactory is not null) {
+                    pollingSource = pollingSourceFactory(sp);
+                }
+                else if (topologySourceType is not null) {
+                    pollingSource = (IPollingTopologySource)sp.GetRequiredService(topologySourceType);
+                }
+
+                if (pollingSource is null) {
+                    throw new InvalidOperationException("Could not resolve polling topology source.");
+                }
+
+                streamingSource = new PollingToStreamingAdapter(pollingSource, delay);
+            }
+
+            // Create resolver factory
+            var resolverFactory = new ClusterResolverFactory(
+                streamingSource,
+                [.. seeds],
+                resilience,
+                seedChannelPool,
+                loggerFactory);
+
+            // Create load balancer factory
+            var loadBalancerFactory = new ClusterLoadBalancerFactory(loggerFactory);
+
+            // Build inner service provider for gRPC
+            var grpcServices = new ServiceCollection();
+            grpcServices.AddSingleton<ResolverFactory>(resolverFactory);
+            grpcServices.AddSingleton<LoadBalancerFactory>(loadBalancerFactory);
+            var grpcServiceProvider = grpcServices.BuildServiceProvider();
+
+            // Build channel options
+            var channelOptions = new GrpcChannelOptions {
+                ServiceProvider = grpcServiceProvider
+            };
+
+            configureChannel?.Invoke(channelOptions);
+
+            // Add refresh trigger interceptor
+            var interceptor = new RefreshTriggerInterceptor(
+                refreshPolicy,
+                () => { }, // Refresh is handled by load balancer infrastructure
+                loggerFactory?.CreateLogger<RefreshTriggerInterceptor>()
+                    ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<RefreshTriggerInterceptor>.Instance);
+
+            var existingInterceptors = channelOptions.Interceptors?.ToList() ?? [];
+            existingInterceptors.Insert(0, interceptor);
+            channelOptions.Interceptors = existingInterceptors;
+
+            // Create channel with custom scheme
+            var channelId = Guid.NewGuid();
+            return GrpcChannel.ForAddress($"cluster:///{channelId}", channelOptions);
         });
 
         return _services;
-    }
-
-    static GrpcChannel CreateChannelGeneric<TNode>(
-        IServiceProvider sp,
-        DnsEndPoint[] seeds,
-        ResilienceOptions resilience,
-        TimeSpan delay,
-        ShouldRefreshTopology refreshPolicy,
-        Action<GrpcChannelOptions>? configureChannel,
-        bool useTls,
-        bool isStreaming,
-        Type? topologySourceType,
-        object? topologySourceInstance,
-        Func<IServiceProvider, object>? topologySourceFactory)
-        where TNode : struct, IClusterNode {
-
-        var loggerFactory = sp.GetService<ILoggerFactory>();
-        var logger = loggerFactory?.CreateLogger<SeedChannelPool>();
-
-        // Create channel options for seed channels
-        var seedChannelOptions = new GrpcChannelOptions();
-        configureChannel?.Invoke(seedChannelOptions);
-
-        // Create seed channel pool
-        var seedChannelPool = new SeedChannelPool(
-            seedChannelOptions,
-            useTls,
-            logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
-
-        // Get or create topology source
-        IStreamingTopologySource<TNode> streamingSource;
-
-        if (isStreaming) {
-            IStreamingTopologySource<TNode>? source = null;
-
-            if (topologySourceInstance is not null) {
-                source = (IStreamingTopologySource<TNode>)topologySourceInstance;
-            }
-            else if (topologySourceFactory is not null) {
-                source = (IStreamingTopologySource<TNode>)topologySourceFactory(sp);
-            }
-            else if (topologySourceType is not null) {
-                source = (IStreamingTopologySource<TNode>)sp.GetRequiredService(topologySourceType);
-            }
-
-            streamingSource = source ?? throw new InvalidOperationException("Could not resolve streaming topology source.");
-        }
-        else {
-            IPollingTopologySource<TNode>? pollingSource = null;
-
-            if (topologySourceInstance is not null) {
-                pollingSource = (IPollingTopologySource<TNode>)topologySourceInstance;
-            }
-            else if (topologySourceFactory is not null) {
-                pollingSource = (IPollingTopologySource<TNode>)topologySourceFactory(sp);
-            }
-            else if (topologySourceType is not null) {
-                pollingSource = (IPollingTopologySource<TNode>)sp.GetRequiredService(topologySourceType);
-            }
-
-            if (pollingSource is null) {
-                throw new InvalidOperationException("Could not resolve polling topology source.");
-            }
-
-            streamingSource = new PollingToStreamingAdapter<TNode>(pollingSource, delay);
-        }
-
-        // Create resolver factory
-        var resolverFactory = new ClusterResolverFactory<TNode>(
-            streamingSource,
-            [.. seeds],
-            resilience,
-            seedChannelPool,
-            loggerFactory);
-
-        // Create load balancer factory
-        var loadBalancerFactory = new ClusterLoadBalancerFactory(loggerFactory);
-
-        // Build inner service provider for gRPC
-        var grpcServices = new ServiceCollection();
-        grpcServices.AddSingleton<ResolverFactory>(resolverFactory);
-        grpcServices.AddSingleton<LoadBalancerFactory>(loadBalancerFactory);
-        var grpcServiceProvider = grpcServices.BuildServiceProvider();
-
-        // Build channel options
-        var channelOptions = new GrpcChannelOptions {
-            ServiceProvider = grpcServiceProvider
-        };
-
-        configureChannel?.Invoke(channelOptions);
-
-        // Add refresh trigger interceptor
-        var interceptor = new RefreshTriggerInterceptor(
-            refreshPolicy,
-            () => { }, // Refresh is handled by load balancer infrastructure
-            loggerFactory?.CreateLogger<RefreshTriggerInterceptor>()
-                ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<RefreshTriggerInterceptor>.Instance);
-
-        var existingInterceptors = channelOptions.Interceptors?.ToList() ?? [];
-        existingInterceptors.Insert(0, interceptor);
-        channelOptions.Interceptors = existingInterceptors;
-
-        // Create channel with custom scheme
-        var channelId = Guid.NewGuid();
-        return GrpcChannel.ForAddress($"cluster:///{channelId}", channelOptions);
     }
 }

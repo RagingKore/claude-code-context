@@ -8,10 +8,8 @@ namespace Raging.Grpc.LoadBalancing.Internal;
 /// <summary>
 /// Custom resolver that discovers cluster topology and reports addresses to the load balancer.
 /// </summary>
-internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
-    where TNode : struct, IClusterNode {
-
-    readonly IStreamingTopologySource<TNode> _topologySource;
+internal sealed class ClusterResolver : Resolver, IAsyncDisposable {
+    readonly IStreamingTopologySource _topologySource;
     readonly ImmutableArray<DnsEndPoint> _seeds;
     readonly SeedChannelPool _channelPool;
     readonly ResilienceOptions _resilience;
@@ -19,10 +17,10 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
 
     CancellationTokenSource? _cts;
     Task? _subscriptionTask;
-    ClusterTopology<TNode> _lastTopology;
+    ClusterTopology _lastTopology;
 
     public ClusterResolver(
-        IStreamingTopologySource<TNode> topologySource,
+        IStreamingTopologySource topologySource,
         ImmutableArray<DnsEndPoint> seeds,
         SeedChannelPool channelPool,
         ResilienceOptions resilience,
@@ -53,7 +51,7 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
 
         while (!ct.IsCancellationRequested) {
             var seed = _seeds[seedIndex];
-            seedIndex = (seedIndex + 1) % _seeds.Count;
+            seedIndex = (seedIndex + 1) % _seeds.Length;
 
             try {
                 await SubscribeToSeedAsync(seed, ct).ConfigureAwait(false);
@@ -102,7 +100,7 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
             _logger.TopologyStreamEmpty(seed);
     }
 
-    void ValidateTopology(ClusterTopology<TNode> topology) {
+    void ValidateTopology(ClusterTopology topology) {
         if (topology.IsEmpty)
             throw new ClusterDiscoveryException(1, _seeds, [new InvalidOperationException("Topology returned empty node list.")]);
 
@@ -112,9 +110,9 @@ internal sealed class ClusterResolver<TNode> : Resolver, IAsyncDisposable
         }
     }
 
-    IReadOnlyList<BalancerAddress> BuildAddresses(ClusterTopology<TNode> topology) {
+    IReadOnlyList<BalancerAddress> BuildAddresses(ClusterTopology topology) {
         // Filter eligible nodes
-        var eligible = new List<TNode>();
+        var eligible = new List<ClusterNode>();
         foreach (var node in topology.Nodes)
             if (node.IsEligible)
                 eligible.Add(node);

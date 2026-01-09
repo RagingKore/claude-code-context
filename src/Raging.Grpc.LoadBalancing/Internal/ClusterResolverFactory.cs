@@ -9,19 +9,17 @@ namespace Raging.Grpc.LoadBalancing.Internal;
 /// <summary>
 /// Factory for creating cluster resolvers.
 /// </summary>
-internal sealed class ClusterResolverFactory<TNode> : ResolverFactory
-    where TNode : struct, IClusterNode {
-
+internal sealed class ClusterResolverFactory : ResolverFactory {
     public const string SchemeName = "cluster";
 
-    readonly IStreamingTopologySource<TNode> _topologySource;
+    readonly IStreamingTopologySource _topologySource;
     readonly ImmutableArray<DnsEndPoint> _seeds;
     readonly ResilienceOptions _resilience;
     readonly SeedChannelPool _channelPool;
     readonly ILoggerFactory _loggerFactory;
 
     public ClusterResolverFactory(
-        IStreamingTopologySource<TNode> topologySource,
+        IStreamingTopologySource topologySource,
         ImmutableArray<DnsEndPoint> seeds,
         ResilienceOptions resilience,
         SeedChannelPool channelPool,
@@ -37,9 +35,9 @@ internal sealed class ClusterResolverFactory<TNode> : ResolverFactory
     public override string Name => SchemeName;
 
     public override Resolver Create(ResolverOptions options) {
-        var logger = _loggerFactory.CreateLogger<ClusterResolver<TNode>>();
+        var logger = _loggerFactory.CreateLogger<ClusterResolver>();
 
-        return new ClusterResolver<TNode>(
+        return new ClusterResolver(
             _topologySource,
             _seeds,
             _channelPool,
