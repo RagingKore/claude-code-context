@@ -472,19 +472,303 @@ public interface IStreamingTopologySource : IComparer<ClusterNode> {
 
 ---
 
-## 6. Configuration
+## 6. Configuration & API Reference
 
-### LoadBalancingOptions (POCO)
+### 6.1 Entry Points
+
+There are two ways to create a load-balanced channel:
+
+#### GrpcLoadBalancedChannel (Static Factory - Non-DI)
+
+```csharp
+public static class GrpcLoadBalancedChannel {
+    /// <summary>
+    /// Create a load-balanced channel for the specified address.
+    /// </summary>
+    /// <param name="address">The primary endpoint address. Format: "host:port"</param>
+    /// <param name="configure">Configuration delegate.</param>
+    /// <returns>A configured GrpcChannel with load balancing.</returns>
+    public static GrpcChannel ForAddress(string address, Action<LoadBalancingBuilder> configure);
+
+    /// <summary>
+    /// Create a load-balanced channel from configuration.
+    /// Reads Seeds and Resilience options from IConfiguration, then calls configure delegate.
+    /// </summary>
+    /// <param name="configuration">Configuration section containing LoadBalancingOptions.</param>
+    /// <param name="configure">Configuration delegate for topology source and other non-serializable options.</param>
+    /// <returns>A configured GrpcChannel with load balancing.</returns>
+    public static GrpcChannel FromConfiguration(
+        IConfiguration configuration,
+        Action<LoadBalancingBuilder> configure);
+}
+```
+
+#### ServiceCollectionExtensions (DI)
+
+```csharp
+public static class ServiceCollectionExtensions {
+    /// <summary>
+    /// Add gRPC load balancing to the service collection.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="address">The primary endpoint address. Format: "host:port"</param>
+    /// <returns>A builder for configuring load balancing.</returns>
+    public static LoadBalancingServiceBuilder AddGrpcLoadBalancing(
+        this IServiceCollection services,
+        string address);
+
+    /// <summary>
+    /// Add gRPC load balancing from configuration.
+    /// Reads Seeds and Resilience options from IConfiguration.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="address">The primary endpoint address. Format: "host:port"</param>
+    /// <param name="configuration">Configuration section containing LoadBalancingOptions.</param>
+    /// <returns>A builder for configuring load balancing.</returns>
+    public static LoadBalancingServiceBuilder AddGrpcLoadBalancing(
+        this IServiceCollection services,
+        string address,
+        IConfiguration configuration);
+}
+```
+
+---
+
+### 6.2 LoadBalancingBuilder (Non-DI)
+
+Used with `GrpcLoadBalancedChannel.ForAddress()`. All methods return `this` for chaining.
+
+```csharp
+public sealed class LoadBalancingBuilder {
+
+    // ═══════════════════════════════════════════════════════════════
+    // SEEDS - Additional seed nodes for failover
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Add seeds as strings. Format: "host:port"
+    /// </summary>
+    public LoadBalancingBuilder WithSeeds(params string[] endpoints);
+
+    /// <summary>
+    /// Add seeds as DnsEndPoints.
+    /// </summary>
+    public LoadBalancingBuilder WithSeeds(params DnsEndPoint[] endpoints);
+
+    /// <summary>
+    /// Add seeds from enumerable.
+    /// </summary>
+    public LoadBalancingBuilder WithSeeds(IEnumerable<DnsEndPoint> endpoints);
+
+    // ═══════════════════════════════════════════════════════════════
+    // RESILIENCE - Timeout, backoff, retry configuration
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Configure resilience options (timeout, backoff, max attempts).
+    /// </summary>
+    public LoadBalancingBuilder WithResilience(Action<ResilienceOptions> configure);
+
+    // ═══════════════════════════════════════════════════════════════
+    // TOPOLOGY SOURCE - Required, choose one
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Use a polling topology source instance.
+    /// </summary>
+    /// <param name="source">The topology source instance.</param>
+    /// <param name="delay">Delay between successful polls. Default: 30 seconds.</param>
+    public LoadBalancingBuilder WithPollingTopologySource(
+        IPollingTopologySource source,
+        TimeSpan? delay = null);
+
+    /// <summary>
+    /// Use a streaming topology source instance.
+    /// </summary>
+    public LoadBalancingBuilder WithStreamingTopologySource(IStreamingTopologySource source);
+
+    // ═══════════════════════════════════════════════════════════════
+    // REFRESH POLICY - When to trigger topology refresh on errors
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Custom policy for triggering topology refresh on gRPC errors.
+    /// Default: refresh on StatusCode.Unavailable.
+    /// </summary>
+    public LoadBalancingBuilder WithRefreshPolicy(ShouldRefreshTopology policy);
+
+    // ═══════════════════════════════════════════════════════════════
+    // LOGGING
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Configure logging. If not set, no logging occurs.
+    /// </summary>
+    public LoadBalancingBuilder WithLoggerFactory(ILoggerFactory loggerFactory);
+
+    // ═══════════════════════════════════════════════════════════════
+    // CHANNEL OPTIONS - Configure underlying GrpcChannel
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Configure the underlying GrpcChannel options.
+    /// Called for both seed channels and the main channel.
+    /// </summary>
+    public LoadBalancingBuilder ConfigureChannel(Action<GrpcChannelOptions> configure);
+
+    /// <summary>
+    /// Use TLS for all connections (seeds and cluster nodes).
+    /// Default: false (plain HTTP/2).
+    /// </summary>
+    public LoadBalancingBuilder UseTls(bool useTls = true);
+}
+```
+
+---
+
+### 6.3 LoadBalancingServiceBuilder (DI)
+
+Used with `services.AddGrpcLoadBalancing()`. All methods return `this` for chaining.
+
+```csharp
+public sealed class LoadBalancingServiceBuilder {
+
+    // ═══════════════════════════════════════════════════════════════
+    // SEEDS - Additional seed nodes for failover
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Add seeds as strings. Format: "host:port"
+    /// </summary>
+    public LoadBalancingServiceBuilder WithSeeds(params string[] endpoints);
+
+    /// <summary>
+    /// Add seeds as DnsEndPoints.
+    /// </summary>
+    public LoadBalancingServiceBuilder WithSeeds(params DnsEndPoint[] endpoints);
+
+    /// <summary>
+    /// Add seeds from enumerable.
+    /// </summary>
+    public LoadBalancingServiceBuilder WithSeeds(IEnumerable<DnsEndPoint> endpoints);
+
+    // ═══════════════════════════════════════════════════════════════
+    // RESILIENCE - Timeout, backoff, retry configuration
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Configure resilience options (timeout, backoff, max attempts).
+    /// </summary>
+    public LoadBalancingServiceBuilder WithResilience(Action<ResilienceOptions> configure);
+
+    // ═══════════════════════════════════════════════════════════════
+    // POLLING TOPOLOGY SOURCE - Choose one source type
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Register topology source type for DI resolution.
+    /// The type is registered as singleton and resolved from the service provider.
+    /// </summary>
+    /// <typeparam name="TSource">The topology source type.</typeparam>
+    /// <param name="delay">Delay between successful polls. Default: 30 seconds.</param>
+    public LoadBalancingServiceBuilder WithPollingTopologySource<TSource>(TimeSpan? delay = null)
+        where TSource : class, IPollingTopologySource;
+
+    /// <summary>
+    /// Use a pre-created topology source instance.
+    /// </summary>
+    /// <param name="source">The topology source instance.</param>
+    /// <param name="delay">Delay between successful polls. Default: 30 seconds.</param>
+    public LoadBalancingServiceBuilder WithPollingTopologySource(
+        IPollingTopologySource source,
+        TimeSpan? delay = null);
+
+    /// <summary>
+    /// Use a factory function to create the topology source.
+    /// The factory receives IServiceProvider for dependency resolution.
+    /// </summary>
+    /// <param name="factory">Factory function receiving IServiceProvider.</param>
+    /// <param name="delay">Delay between successful polls. Default: 30 seconds.</param>
+    public LoadBalancingServiceBuilder WithPollingTopologySource(
+        Func<IServiceProvider, IPollingTopologySource> factory,
+        TimeSpan? delay = null);
+
+    // ═══════════════════════════════════════════════════════════════
+    // STREAMING TOPOLOGY SOURCE - Choose one source type
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Register streaming topology source type for DI resolution.
+    /// The type is registered as singleton and resolved from the service provider.
+    /// </summary>
+    /// <typeparam name="TSource">The topology source type.</typeparam>
+    public LoadBalancingServiceBuilder WithStreamingTopologySource<TSource>()
+        where TSource : class, IStreamingTopologySource;
+
+    /// <summary>
+    /// Use a pre-created streaming topology source instance.
+    /// </summary>
+    public LoadBalancingServiceBuilder WithStreamingTopologySource(IStreamingTopologySource source);
+
+    /// <summary>
+    /// Use a factory function to create the streaming topology source.
+    /// The factory receives IServiceProvider for dependency resolution.
+    /// </summary>
+    public LoadBalancingServiceBuilder WithStreamingTopologySource(
+        Func<IServiceProvider, IStreamingTopologySource> factory);
+
+    // ═══════════════════════════════════════════════════════════════
+    // CONFIGURATION - Refresh policy, channel options, TLS
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Custom policy for triggering topology refresh on gRPC errors.
+    /// Default: refresh on StatusCode.Unavailable.
+    /// </summary>
+    public LoadBalancingServiceBuilder WithRefreshPolicy(ShouldRefreshTopology policy);
+
+    /// <summary>
+    /// Configure the underlying GrpcChannel options.
+    /// Called for both seed channels and the main channel.
+    /// </summary>
+    public LoadBalancingServiceBuilder ConfigureChannel(Action<GrpcChannelOptions> configure);
+
+    /// <summary>
+    /// Use TLS for all connections (seeds and cluster nodes).
+    /// Default: false (plain HTTP/2).
+    /// </summary>
+    public LoadBalancingServiceBuilder UseTls(bool useTls = true);
+
+    // ═══════════════════════════════════════════════════════════════
+    // BUILD - Finalize and register in service collection
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Register the configured GrpcChannel as a singleton in the service collection.
+    /// Must be called to complete configuration.
+    /// </summary>
+    /// <returns>The service collection for further chaining.</returns>
+    public IServiceCollection Build();
+}
+```
+
+---
+
+### 6.4 Configuration Options (POCO)
+
+These classes are JSON-serializable for configuration file support.
 
 ```csharp
 public sealed class LoadBalancingOptions {
     /// <summary>
     /// Seed endpoints for discovery. Format: "host:port"
+    /// First seed is used as primary endpoint.
     /// </summary>
     public required string[] Seeds { get; set; }
 
     /// <summary>
     /// Delay between topology polls (only for polling source).
+    /// Default: 30 seconds.
     /// </summary>
     public TimeSpan Delay { get; set; } = TimeSpan.FromSeconds(30);
 
@@ -497,6 +781,7 @@ public sealed class LoadBalancingOptions {
 public sealed class ResilienceOptions {
     /// <summary>
     /// Timeout for individual topology calls.
+    /// Default: 5 seconds.
     /// </summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(5);
 
@@ -504,27 +789,81 @@ public sealed class ResilienceOptions {
     /// Maximum consecutive failures before giving up on a seed.
     /// After this many failures, the adapter lets the exception propagate
     /// so the resolver can try the next seed.
+    /// Default: 10.
     /// </summary>
     public int MaxDiscoveryAttempts { get; set; } = 10;
 
     /// <summary>
     /// Initial backoff duration after a polling failure.
+    /// Grows exponentially: InitialBackoff * 2^(attempt-1).
+    /// Default: 100 milliseconds.
     /// </summary>
     public TimeSpan InitialBackoff { get; set; } = TimeSpan.FromMilliseconds(100);
 
     /// <summary>
     /// Maximum backoff duration (cap for exponential growth).
+    /// Default: 5 seconds.
     /// </summary>
     public TimeSpan MaxBackoff { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// gRPC status codes that trigger topology refresh.
+    /// Default: [14] (Unavailable).
     /// </summary>
-    public int[] RefreshOnStatusCodes { get; set; } = [14]; // Unavailable
+    public int[] RefreshOnStatusCodes { get; set; } = [14];
 }
 ```
 
-### JSON Configuration
+---
+
+### 6.5 Refresh Policy
+
+```csharp
+/// <summary>
+/// Delegate that determines if topology should be refreshed based on an RPC exception.
+/// </summary>
+public delegate bool ShouldRefreshTopology(RpcException exception);
+
+/// <summary>
+/// Built-in refresh policies for determining when to refresh topology.
+/// </summary>
+public static class RefreshPolicy {
+    /// <summary>
+    /// Refresh on Unavailable status (connection issues).
+    /// This is the default policy.
+    /// </summary>
+    public static readonly ShouldRefreshTopology Default;
+
+    /// <summary>
+    /// Refresh on any of the specified status codes.
+    /// </summary>
+    public static ShouldRefreshTopology OnStatusCodes(params StatusCode[] codes);
+
+    /// <summary>
+    /// Create a policy from status code integers (useful for JSON configuration).
+    /// </summary>
+    public static ShouldRefreshTopology FromStatusCodeInts(params int[] statusCodes);
+
+    /// <summary>
+    /// Refresh when exception message contains any of the specified strings (case-insensitive).
+    /// </summary>
+    public static ShouldRefreshTopology OnMessageContains(params string[] triggers);
+
+    /// <summary>
+    /// Combine multiple policies (refresh if ANY match).
+    /// </summary>
+    public static ShouldRefreshTopology Any(params ShouldRefreshTopology[] policies);
+
+    /// <summary>
+    /// Combine multiple policies (refresh if ALL match).
+    /// </summary>
+    public static ShouldRefreshTopology All(params ShouldRefreshTopology[] policies);
+}
+```
+
+---
+
+### 6.6 JSON Configuration Example
 
 ```json
 {
@@ -542,20 +881,58 @@ public sealed class ResilienceOptions {
 }
 ```
 
-### Fluent Builder (Non-DI)
+---
+
+### 6.7 Usage Examples
+
+#### Non-DI: Basic Usage
 
 ```csharp
 var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
     .WithSeeds("node2:5000", "node3:5000")
-    .WithPollingTopologySource(new MyTopologySource(), delay: TimeSpan.FromSeconds(30))
-    .WithResilience(r => r.Timeout = TimeSpan.FromSeconds(3))
-    .WithLoggerFactory(loggerFactory)
-    .ConfigureChannel(opts => opts.MaxReceiveMessageSize = 16 * 1024 * 1024));
+    .WithPollingTopologySource(new MyTopologySource()));
+
+var client = new MyService.MyServiceClient(channel);
 ```
 
-### DI Registration
+#### Non-DI: Full Configuration
 
 ```csharp
+var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource(new MyTopologySource(), delay: TimeSpan.FromSeconds(15))
+    .WithResilience(r => {
+        r.Timeout = TimeSpan.FromSeconds(3);
+        r.MaxDiscoveryAttempts = 5;
+        r.InitialBackoff = TimeSpan.FromMilliseconds(200);
+        r.MaxBackoff = TimeSpan.FromSeconds(10);
+    })
+    .WithRefreshPolicy(RefreshPolicy.Any(
+        RefreshPolicy.Default,
+        RefreshPolicy.OnStatusCodes(StatusCode.NotFound)))
+    .WithLoggerFactory(loggerFactory)
+    .ConfigureChannel(opts => {
+        opts.MaxReceiveMessageSize = 16 * 1024 * 1024;
+        opts.MaxSendMessageSize = 16 * 1024 * 1024;
+    })
+    .UseTls());
+```
+
+#### Non-DI: From Configuration File
+
+```csharp
+var config = configuration.GetSection("LoadBalancing");
+var channel = GrpcLoadBalancedChannel.FromConfiguration(config, lb => lb
+    .WithPollingTopologySource(new MyTopologySource())
+    .WithLoggerFactory(loggerFactory));
+```
+
+#### DI: Type Registration
+
+```csharp
+// Register topology source type - resolved from DI
+services.AddSingleton<MyTopologySource>();
+
 services.AddGrpcLoadBalancing("node1:5000")
     .WithSeeds("node2:5000", "node3:5000")
     .WithPollingTopologySource<MyTopologySource>(delay: TimeSpan.FromSeconds(30))
@@ -565,6 +942,41 @@ services.AddGrpcLoadBalancing("node1:5000")
 public class MyService(GrpcChannel channel) {
     readonly MyGrpcClient _client = new(channel);
 }
+```
+
+#### DI: Factory Function
+
+```csharp
+services.AddGrpcLoadBalancing("node1:5000")
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource(sp => {
+        var config = sp.GetRequiredService<IOptions<MyConfig>>().Value;
+        var logger = sp.GetRequiredService<ILogger<MyTopologySource>>();
+        return new MyTopologySource(config.PreferredDatacenter, logger);
+    }, delay: TimeSpan.FromSeconds(30))
+    .WithResilience(r => r.Timeout = TimeSpan.FromSeconds(3))
+    .ConfigureChannel(opts => opts.Credentials = ChannelCredentials.SecureSsl)
+    .UseTls()
+    .Build();
+```
+
+#### DI: From Configuration File
+
+```csharp
+var config = configuration.GetSection("LoadBalancing");
+
+services.AddGrpcLoadBalancing("node1:5000", config)
+    .WithPollingTopologySource<MyTopologySource>()
+    .Build();
+```
+
+#### DI: Streaming Source
+
+```csharp
+services.AddGrpcLoadBalancing("node1:5000")
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithStreamingTopologySource<MyStreamingSource>()
+    .Build();
 ```
 
 ---
