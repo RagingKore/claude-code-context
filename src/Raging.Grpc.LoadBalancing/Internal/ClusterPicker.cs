@@ -12,28 +12,36 @@ internal sealed class ClusterPicker : SubchannelPicker {
     /// </summary>
     public const string PriorityAttributeKey = "cluster-node-priority";
 
-    static readonly Status NoEligibleNodesStatus =
-        new(StatusCode.Unavailable, "No eligible nodes available in cluster.");
+    static readonly Status NoReadyNodesStatus =
+        new(StatusCode.Unavailable, "No ready nodes available in cluster.");
 
-    readonly Subchannel[] _subchannels;
+    readonly Subchannel[] _readySubchannels;
     readonly int _topTierCount;
     int _roundRobinIndex;
 
     /// <summary>
     /// Creates a new picker with the specified subchannels.
-    /// Subchannels should already be sorted by priority.
+    /// Filters to Ready subchannels and sorts by priority.
     /// </summary>
-    /// <param name="subchannels">The ready subchannels, sorted by priority.</param>
+    /// <param name="subchannels">All subchannels from the load balancer.</param>
     public ClusterPicker(IReadOnlyList<Subchannel> subchannels) {
-        if (subchannels.Count == 0) {
-            _subchannels = [];
+        // Filter to Ready subchannels
+        var ready = new List<Subchannel>();
+        foreach (var s in subchannels)
+            if (s.State == ConnectivityState.Ready)
+                ready.Add(s);
+
+        if (ready.Count == 0) {
+            _readySubchannels = [];
             _topTierCount = 0;
             return;
         }
 
-        // Copy to array (subchannels are already sorted by load balancer)
-        _subchannels = [.. subchannels];
-        _topTierCount = CountTopTier(_subchannels);
+        // Sort by priority
+        ready.Sort((a, b) => GetPriority(a).CompareTo(GetPriority(b)));
+
+        _readySubchannels = [.. ready];
+        _topTierCount = CountTopTier(_readySubchannels);
     }
 
     /// <summary>
@@ -43,8 +51,8 @@ internal sealed class ClusterPicker : SubchannelPicker {
     public override PickResult Pick(PickContext context) {
         // HOT PATH - NO ALLOCATIONS
 
-        if (_subchannels.Length == 0)
-            return PickResult.ForFailure(NoEligibleNodesStatus);
+        if (_readySubchannels.Length == 0)
+            return PickResult.ForFailure(NoReadyNodesStatus);
 
         // Atomic increment and round-robin within top tier
         var index = Interlocked.Increment(ref _roundRobinIndex);
@@ -52,12 +60,9 @@ internal sealed class ClusterPicker : SubchannelPicker {
         // Handle potential overflow and ensure positive index within top tier
         var selectedIndex = ((index % _topTierCount) + _topTierCount) % _topTierCount;
 
-        return PickResult.ForSubchannel(_subchannels[selectedIndex]);
+        return PickResult.ForSubchannel(_readySubchannels[selectedIndex]);
     }
 
-    /// <summary>
-    /// Count how many subchannels are in the top priority tier.
-    /// </summary>
     static int CountTopTier(Subchannel[] sorted) {
         if (sorted.Length == 0)
             return 0;
@@ -74,9 +79,6 @@ internal sealed class ClusterPicker : SubchannelPicker {
         return count;
     }
 
-    /// <summary>
-    /// Get the priority from a subchannel's attributes.
-    /// </summary>
     static int GetPriority(Subchannel subchannel) {
         if (subchannel.Attributes.TryGetValue(PriorityAttributeKey, out var value) && value is int priority)
             return priority;

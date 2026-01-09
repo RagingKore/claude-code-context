@@ -34,11 +34,6 @@ internal static partial class Log {
     public static partial void TopologyChanged(this ILogger logger, int addedCount, int removedCount);
 
     [LoggerMessage(
-        Level = LogLevel.Debug,
-        Message = "Picker updated with {SubchannelCount} subchannels, top tier has {TopTierCount} nodes")]
-    public static partial void PickerUpdated(this ILogger logger, int subchannelCount, int topTierCount);
-
-    [LoggerMessage(
         Level = LogLevel.Warning,
         Message = "No eligible nodes in topology, total nodes: {TotalNodes}")]
     public static partial void NoEligibleNodes(this ILogger logger, int totalNodes);

@@ -103,48 +103,26 @@ internal sealed class ClusterLoadBalancer : LoadBalancer {
     }
 
     void UpdatePicker() {
-        // Get ready subchannels - order preserved from Resolver
-        var ready = new List<Subchannel>();
-        foreach (var s in _subchannels)
-            if (s.State == ConnectivityState.Ready)
-                ready.Add(s);
+        // Determine overall connectivity state
+        var hasReady = false;
+        var hasConnecting = false;
+        foreach (var s in _subchannels) {
+            if (s.State == ConnectivityState.Ready) hasReady = true;
+            else if (s.State == ConnectivityState.Connecting) hasConnecting = true;
+        }
 
-        var connectivityState = ready.Count > 0
+        var connectivityState = hasReady
             ? ConnectivityState.Ready
-            : _subchannels.Any(s => s.State == ConnectivityState.Connecting)
+            : hasConnecting
                 ? ConnectivityState.Connecting
                 : _subchannels.Count > 0
                     ? ConnectivityState.TransientFailure
                     : ConnectivityState.Idle;
 
-        var picker = new ClusterPicker(ready);
-
-        _logger.PickerUpdated(ready.Count, CountTopTier(ready));
+        // Pass ALL subchannels to picker - it decides what to do
+        var picker = new ClusterPicker(_subchannels);
 
         _controller.UpdateState(new BalancerState(connectivityState, picker));
-    }
-
-    static int GetPriority(Subchannel subchannel) {
-        if (subchannel.Attributes.TryGetValue(ClusterPicker.PriorityAttributeKey, out var value) && value is int priority)
-            return priority;
-
-        return int.MaxValue;
-    }
-
-    static int CountTopTier(List<Subchannel> sorted) {
-        if (sorted.Count == 0)
-            return 0;
-
-        var topPriority = GetPriority(sorted[0]);
-        var count = 1;
-
-        for (var i = 1; i < sorted.Count; i++) {
-            if (GetPriority(sorted[i]) != topPriority)
-                break;
-            count++;
-        }
-
-        return count;
     }
 
     /// <inheritdoc />
