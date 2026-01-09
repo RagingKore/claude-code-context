@@ -23,6 +23,7 @@
 11. [File Structure](#11-file-structure)
 12. [Examples](#12-examples)
 13. [Internal Implementation Reference](#13-internal-implementation-reference)
+14. [Assembly & Wiring](#14-assembly--wiring)
 
 ---
 
@@ -1529,7 +1530,8 @@ src/Raging.Grpc.LoadBalancing/
 │   ├── ClusterLoadBalancerFactory.cs
 │   ├── ClusterPicker.cs                    # Picks per request
 │   ├── PollingToStreamingAdapter.cs        # Wraps polling source
-│   ├── RefreshTriggerInterceptor.cs        # Triggers refresh on error
+│   ├── RefreshTrigger.cs                   # Coordinator between handler and resolver
+│   ├── RefreshTriggerHandler.cs            # HTTP handler for refresh on error
 │   ├── SeedChannelPool.cs                  # Reusable seed channels
 │   ├── BackoffCalculator.cs                # Exponential backoff
 │   └── Log.cs                              # Source-generated logging
@@ -2163,63 +2165,51 @@ internal sealed class ClusterPicker : SubchannelPicker {
 
 ---
 
-### 13.10 RefreshTriggerInterceptor
+### 13.10 RefreshTriggerHandler (HTTP-Level)
+
+> **Note:** This replaces the original `RefreshTriggerInterceptor` design. Using an HTTP `DelegatingHandler` provides channel-level interception without requiring special client creation. See Section 14.2 for complete implementation.
 
 ```csharp
 namespace Raging.Grpc.LoadBalancing.Internal;
 
 /// <summary>
-/// Interceptor that triggers topology refresh on configurable RPC exceptions.
-/// Wraps all four gRPC call types: Unary, ClientStreaming, ServerStreaming, DuplexStreaming.
+/// HTTP delegating handler that triggers topology refresh on configurable gRPC errors.
+/// Intercepts at HTTP level so all channel traffic is monitored automatically.
 /// </summary>
-internal sealed class RefreshTriggerInterceptor : Interceptor {
+internal sealed class RefreshTriggerHandler : DelegatingHandler {
+    const string GrpcStatusHeader = "grpc-status";
+
     readonly ShouldRefreshTopology _policy;
-    readonly Action _triggerRefresh;
-    readonly ILogger _logger;
+    readonly RefreshTrigger _refreshTrigger;
+    readonly ILogger? _logger;
 
     /// <summary>
-    /// Creates a new refresh trigger interceptor.
+    /// Creates a new refresh trigger handler.
     /// </summary>
-    /// <param name="policy">The policy that determines when to refresh.</param>
-    /// <param name="triggerRefresh">Action to call to trigger refresh.</param>
-    /// <param name="logger">Logger instance.</param>
-    public RefreshTriggerInterceptor(
+    /// <param name="innerHandler">The inner HTTP handler (SocketsHttpHandler).</param>
+    /// <param name="policy">Policy determining when to trigger refresh.</param>
+    /// <param name="refreshTrigger">The shared refresh trigger coordinator.</param>
+    /// <param name="logger">Optional logger.</param>
+    public RefreshTriggerHandler(
+        HttpMessageHandler innerHandler,
         ShouldRefreshTopology policy,
-        Action triggerRefresh,
-        ILogger logger);
+        RefreshTrigger refreshTrigger,
+        ILogger? logger = null);
 
     /// <summary>
-    /// Intercept unary calls - wraps response task to catch RpcException.
+    /// Intercepts HTTP requests, checks gRPC status in response trailers.
+    /// On connection failure or matching gRPC status code, triggers refresh.
     /// </summary>
-    public override AsyncUnaryCall<TResponse> AsyncUnaryCall<TRequest, TResponse>(...);
-
-    /// <summary>
-    /// Intercept client streaming calls - wraps response task.
-    /// </summary>
-    public override AsyncClientStreamingCall<TRequest, TResponse> AsyncClientStreamingCall<TRequest, TResponse>(...);
-
-    /// <summary>
-    /// Intercept server streaming calls - wraps response stream with RefreshTriggerStreamReader.
-    /// </summary>
-    public override AsyncServerStreamingCall<TResponse> AsyncServerStreamingCall<TRequest, TResponse>(...);
-
-    /// <summary>
-    /// Intercept duplex streaming calls - wraps response stream with RefreshTriggerStreamReader.
-    /// </summary>
-    public override AsyncDuplexStreamingCall<TRequest, TResponse> AsyncDuplexStreamingCall<TRequest, TResponse>(...);
-
-    // Internal: HandleResponse - awaits response, catches RpcException, checks policy
-    // Internal: CheckAndTriggerRefresh - if policy returns true, calls _triggerRefresh
-
-    /// <summary>
-    /// Stream reader wrapper that checks for refresh triggers on MoveNext.
-    /// </summary>
-    sealed class RefreshTriggerStreamReader<T> : IAsyncStreamReader<T> {
-        public T Current { get; }
-        public Task<bool> MoveNext(CancellationToken cancellationToken);
-    }
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken);
 }
 ```
+
+**Why HTTP Handler instead of gRPC Interceptor:**
+- **Channel-level**: Works for ALL clients created from the channel
+- **No special client creation**: User code remains `new MyClient(channel)`
+- **Simpler wiring**: Injected via `GrpcChannelOptions.HttpHandler`
 
 ---
 
@@ -2343,6 +2333,846 @@ internal static partial class Log {
     [LoggerMessage(Level = LogLevel.Error,
         Message = "Polling failed after {Attempts} attempts, giving up on this seed")]
     public static partial void PollingMaxAttemptsExceeded(this ILogger logger, int attempts, Exception exception);
+}
+```
+
+---
+
+## 14. Assembly & Wiring
+
+This section documents the critical wiring code that connects all components together. This is the "glue" that makes everything work.
+
+### 14.1 RefreshTrigger (Coordinator)
+
+The `RefreshTrigger` is a shared object that connects the interceptor to the resolver without tight coupling.
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// Coordinates refresh requests between the interceptor and resolver.
+/// Thread-safe - can be triggered from any thread.
+/// </summary>
+internal sealed class RefreshTrigger {
+    /// <summary>
+    /// Event raised when refresh is requested.
+    /// Resolver subscribes to this in its constructor.
+    /// </summary>
+    public event Action? RefreshRequested;
+
+    /// <summary>
+    /// Trigger a topology refresh.
+    /// Called by RefreshTriggerHandler when policy matches.
+    /// </summary>
+    public void Trigger() => RefreshRequested?.Invoke();
+}
+```
+
+**Wiring:**
+- Created once in builder
+- Passed to `ClusterResolverFactory` → resolver subscribes to `RefreshRequested`
+- Passed to `RefreshTriggerHandler` → handler calls `Trigger()`
+
+---
+
+### 14.2 RefreshTriggerHandler (HTTP-Level)
+
+**Important Design Change:** Use `DelegatingHandler` instead of gRPC `Interceptor` for channel-level refresh triggering. This intercepts at the HTTP level, so ALL calls through the channel are monitored without requiring special client creation.
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Internal;
+
+/// <summary>
+/// HTTP delegating handler that triggers topology refresh on configurable gRPC errors.
+/// Intercepts at HTTP level so all channel traffic is monitored.
+/// </summary>
+internal sealed class RefreshTriggerHandler : DelegatingHandler {
+    const string GrpcStatusHeader = "grpc-status";
+
+    readonly ShouldRefreshTopology _policy;
+    readonly RefreshTrigger _refreshTrigger;
+    readonly ILogger? _logger;
+
+    /// <summary>
+    /// Creates a new refresh trigger handler.
+    /// </summary>
+    /// <param name="innerHandler">The inner HTTP handler (typically HttpClientHandler or SocketsHttpHandler).</param>
+    /// <param name="policy">Policy determining when to trigger refresh.</param>
+    /// <param name="refreshTrigger">The shared refresh trigger.</param>
+    /// <param name="logger">Optional logger.</param>
+    public RefreshTriggerHandler(
+        HttpMessageHandler innerHandler,
+        ShouldRefreshTopology policy,
+        RefreshTrigger refreshTrigger,
+        ILogger? logger = null) : base(innerHandler) {
+        _policy = policy;
+        _refreshTrigger = refreshTrigger;
+        _logger = logger;
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken) {
+
+        HttpResponseMessage response;
+        try {
+            response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex) {
+            // Connection failure - create synthetic RpcException to check policy
+            var rpcEx = new RpcException(new Status(StatusCode.Unavailable, ex.Message, ex));
+            if (_policy(rpcEx)) {
+                _logger?.RefreshTriggered(StatusCode.Unavailable);
+                _refreshTrigger.Trigger();
+            }
+            throw;
+        }
+
+        // Check grpc-status in trailers (for successful HTTP responses with gRPC errors)
+        if (response.TrailingHeaders.TryGetValues(GrpcStatusHeader, out var values)) {
+            var statusStr = values.FirstOrDefault();
+            if (int.TryParse(statusStr, out var statusCode) && statusCode != 0) {
+                var grpcStatus = (StatusCode)statusCode;
+                var rpcEx = new RpcException(new Status(grpcStatus, "gRPC call failed"));
+                if (_policy(rpcEx)) {
+                    _logger?.RefreshTriggered(grpcStatus);
+                    _refreshTrigger.Trigger();
+                }
+            }
+        }
+
+        return response;
+    }
+}
+```
+
+**Why HTTP Handler instead of gRPC Interceptor:**
+- Channel-level: Works for ALL clients created from the channel
+- No special client creation required
+- User's code remains: `new MyClient(channel)` (not `channel.Intercept(...)`)
+
+---
+
+### 14.3 gRPC Service Provider Registration
+
+gRPC .NET uses `IServiceProvider` to locate custom `ResolverFactory` and `LoadBalancerFactory` implementations.
+
+```csharp
+// How gRPC finds factories:
+// 1. ResolverFactory: Matched by URI scheme (e.g., "cluster://")
+// 2. LoadBalancerFactory: Matched by policy name in ServiceConfig
+
+// Create service collection with our factories
+var services = new ServiceCollection();
+services.AddSingleton<ResolverFactory>(resolverFactory);
+services.AddSingleton<LoadBalancerFactory>(loadBalancerFactory);
+var serviceProvider = services.BuildServiceProvider();
+
+// Configure channel to use our factories
+var channelOptions = new GrpcChannelOptions {
+    ServiceProvider = serviceProvider,
+    ServiceConfig = new ServiceConfig {
+        LoadBalancingConfigs = { new LoadBalancingConfig(ClusterLoadBalancerFactory.PolicyName) }
+    },
+    HttpHandler = refreshTriggerHandler  // Our custom handler
+};
+
+// Create channel with "cluster://" scheme to trigger our resolver
+var channel = GrpcChannel.ForAddress($"cluster://{primaryEndpoint.Host}", channelOptions);
+```
+
+**Key Points:**
+- URI scheme `cluster://` matches `ClusterResolverFactory.Name`
+- `ServiceConfig` specifies `"cluster"` load balancing policy
+- `HttpHandler` is our `RefreshTriggerHandler` wrapping `SocketsHttpHandler`
+
+---
+
+### 14.4 LoadBalancingBuilder - Complete Implementation
+
+```csharp
+namespace Raging.Grpc.LoadBalancing;
+
+public sealed class LoadBalancingBuilder {
+    readonly DnsEndPoint _primaryEndpoint;
+    readonly List<DnsEndPoint> _seeds = [];
+    readonly ResilienceOptions _resilience = new();
+
+    IStreamingTopologySource? _streamingSource;
+    IPollingTopologySource? _pollingSource;
+    TimeSpan _pollingDelay = TimeSpan.FromSeconds(30);
+    ShouldRefreshTopology _refreshPolicy = RefreshPolicy.Default;
+    ILoggerFactory? _loggerFactory;
+    Action<GrpcChannelOptions>? _configureChannel;
+    bool _useTls;
+
+    // Track disposables for cleanup
+    SeedChannelPool? _channelPool;
+    ServiceProvider? _serviceProvider;
+
+    internal LoadBalancingBuilder(DnsEndPoint primaryEndpoint) {
+        _primaryEndpoint = primaryEndpoint;
+        _seeds.Add(primaryEndpoint);
+    }
+
+    // ... all With* methods as documented in Section 6.2 ...
+
+    /// <summary>
+    /// Build the configured GrpcChannel.
+    /// </summary>
+    /// <returns>A configured GrpcChannel with load balancing.</returns>
+    /// <exception cref="LoadBalancingConfigurationException">Thrown when configuration is invalid.</exception>
+    public GrpcChannel Build() {
+        // Validate configuration
+        if (_streamingSource is null && _pollingSource is null)
+            throw new LoadBalancingConfigurationException(
+                "A topology source is required. Call WithPollingTopologySource or WithStreamingTopologySource.");
+
+        var logger = _loggerFactory?.CreateLogger<LoadBalancingBuilder>();
+
+        // 1. Create refresh trigger (coordinator between handler and resolver)
+        var refreshTrigger = new RefreshTrigger();
+
+        // 2. Create seed channel pool
+        var seedChannelOptions = new GrpcChannelOptions();
+        _configureChannel?.Invoke(seedChannelOptions);
+        _channelPool = new SeedChannelPool(
+            seedChannelOptions,
+            _useTls,
+            _loggerFactory?.CreateLogger<SeedChannelPool>());
+
+        // 3. Get or adapt topology source to streaming
+        IStreamingTopologySource topologySource;
+        if (_streamingSource is not null) {
+            topologySource = _streamingSource;
+        }
+        else {
+            topologySource = new PollingToStreamingAdapter(
+                _pollingSource!,
+                _pollingDelay,
+                _resilience,
+                _loggerFactory?.CreateLogger<PollingToStreamingAdapter>());
+        }
+
+        // 4. Create resolver factory
+        var seeds = _seeds.ToImmutableArray();
+        var resolverFactory = new ClusterResolverFactory(
+            topologySource,
+            seeds,
+            _resilience,
+            _channelPool,
+            refreshTrigger,
+            _loggerFactory);
+
+        // 5. Create load balancer factory
+        var lbFactory = new ClusterLoadBalancerFactory(_loggerFactory);
+
+        // 6. Create service provider with our factories
+        var services = new ServiceCollection();
+        services.AddSingleton<ResolverFactory>(resolverFactory);
+        services.AddSingleton<LoadBalancerFactory>(lbFactory);
+        _serviceProvider = services.BuildServiceProvider();
+
+        // 7. Create HTTP handler chain
+        var innerHandler = new SocketsHttpHandler {
+            EnableMultipleHttp2Connections = true,
+            PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5),
+            KeepAlivePingDelay = TimeSpan.FromSeconds(60),
+            KeepAlivePingTimeout = TimeSpan.FromSeconds(30)
+        };
+        var refreshHandler = new RefreshTriggerHandler(
+            innerHandler,
+            _refreshPolicy,
+            refreshTrigger,
+            _loggerFactory?.CreateLogger<RefreshTriggerHandler>());
+
+        // 8. Configure channel options
+        var channelOptions = new GrpcChannelOptions {
+            ServiceProvider = _serviceProvider,
+            ServiceConfig = new ServiceConfig {
+                LoadBalancingConfigs = { new LoadBalancingConfig(ClusterLoadBalancerFactory.PolicyName) }
+            },
+            HttpHandler = refreshHandler,
+            DisposeHttpClient = true  // Dispose handler when channel is disposed
+        };
+        _configureChannel?.Invoke(channelOptions);
+
+        // 9. Build channel URI
+        // Use cluster:// scheme to trigger our resolver
+        // The host doesn't matter for routing (resolver ignores it) but we use primary for logging
+        var scheme = _useTls ? "https" : "http";
+        var targetUri = $"{ClusterResolverFactory.SchemeName}://{_primaryEndpoint.Host}";
+
+        // 10. Create the channel
+        var channel = GrpcChannel.ForAddress(targetUri, channelOptions);
+
+        // 11. Register for disposal
+        // Note: Channel disposal will dispose HttpHandler (DisposeHttpClient=true)
+        // We need to dispose _channelPool and _serviceProvider separately
+        // Store references for DisposeAsync pattern (see 14.7)
+
+        logger?.LogDebug("Created load-balanced channel for {Target} with {SeedCount} seeds",
+            _primaryEndpoint, seeds.Length);
+
+        return channel;
+    }
+
+    /// <summary>
+    /// Disposes resources created by this builder.
+    /// Call after disposing the GrpcChannel.
+    /// </summary>
+    public async ValueTask DisposeAsync() {
+        if (_channelPool is not null)
+            await _channelPool.DisposeAsync().ConfigureAwait(false);
+
+        _serviceProvider?.Dispose();
+    }
+}
+```
+
+---
+
+### 14.5 GrpcLoadBalancedChannel - Static Factory
+
+```csharp
+namespace Raging.Grpc.LoadBalancing;
+
+/// <summary>
+/// Factory for creating load-balanced gRPC channels.
+/// </summary>
+public static class GrpcLoadBalancedChannel {
+    /// <summary>
+    /// Create a load-balanced channel for the specified address.
+    /// </summary>
+    /// <param name="address">The primary endpoint address. Format: "host:port"</param>
+    /// <param name="configure">Configuration delegate.</param>
+    /// <returns>A configured GrpcChannel with load balancing.</returns>
+    public static GrpcChannel ForAddress(string address, Action<LoadBalancingBuilder> configure) {
+        ArgumentException.ThrowIfNullOrWhiteSpace(address);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        var endpoint = EndpointParser.Parse(address);
+        var builder = new LoadBalancingBuilder(endpoint);
+        configure(builder);
+        return builder.Build();
+    }
+
+    /// <summary>
+    /// Create a load-balanced channel from configuration.
+    /// </summary>
+    /// <param name="configuration">Configuration section containing LoadBalancingOptions.</param>
+    /// <param name="configure">Configuration delegate for non-serializable options.</param>
+    /// <returns>A configured GrpcChannel with load balancing.</returns>
+    public static GrpcChannel FromConfiguration(
+        IConfiguration configuration,
+        Action<LoadBalancingBuilder> configure) {
+
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        var options = configuration.Get<LoadBalancingOptions>()
+            ?? throw new LoadBalancingConfigurationException("Failed to bind configuration to LoadBalancingOptions.");
+
+        if (options.Seeds is not { Length: > 0 })
+            throw new LoadBalancingConfigurationException("At least one seed is required.");
+
+        var primaryEndpoint = EndpointParser.Parse(options.Seeds[0]);
+        var builder = new LoadBalancingBuilder(primaryEndpoint);
+
+        // Apply configuration
+        if (options.Seeds.Length > 1)
+            builder.WithSeeds(options.Seeds[1..]);
+
+        builder.WithResilience(r => {
+            r.Timeout = options.Resilience.Timeout;
+            r.MaxDiscoveryAttempts = options.Resilience.MaxDiscoveryAttempts;
+            r.InitialBackoff = options.Resilience.InitialBackoff;
+            r.MaxBackoff = options.Resilience.MaxBackoff;
+        });
+
+        if (options.Resilience.RefreshOnStatusCodes is { Length: > 0 })
+            builder.WithRefreshPolicy(RefreshPolicy.FromStatusCodeInts(options.Resilience.RefreshOnStatusCodes));
+
+        // Apply user configuration (topology source, etc.)
+        configure(builder);
+
+        return builder.Build();
+    }
+}
+```
+
+---
+
+### 14.6 LoadBalancingServiceBuilder - DI Implementation
+
+```csharp
+namespace Raging.Grpc.LoadBalancing.Extensions;
+
+public sealed class LoadBalancingServiceBuilder {
+    readonly IServiceCollection _services;
+    readonly DnsEndPoint _primaryEndpoint;
+    readonly List<DnsEndPoint> _seeds = [];
+    readonly ResilienceOptions _resilience = new();
+
+    Func<IServiceProvider, IStreamingTopologySource>? _streamingSourceFactory;
+    Func<IServiceProvider, IPollingTopologySource>? _pollingSourceFactory;
+    TimeSpan _pollingDelay = TimeSpan.FromSeconds(30);
+    ShouldRefreshTopology _refreshPolicy = RefreshPolicy.Default;
+    Action<GrpcChannelOptions>? _configureChannel;
+    bool _useTls;
+
+    internal LoadBalancingServiceBuilder(IServiceCollection services, DnsEndPoint primaryEndpoint) {
+        _services = services;
+        _primaryEndpoint = primaryEndpoint;
+        _seeds.Add(primaryEndpoint);
+    }
+
+    // ... all With* methods as documented in Section 6.3 ...
+
+    /// <summary>
+    /// Register the configured GrpcChannel as a singleton in the service collection.
+    /// </summary>
+    /// <returns>The service collection for further chaining.</returns>
+    public IServiceCollection Build() {
+        // Validate
+        if (_streamingSourceFactory is null && _pollingSourceFactory is null)
+            throw new LoadBalancingConfigurationException(
+                "A topology source is required. Call WithPollingTopologySource or WithStreamingTopologySource.");
+
+        var seeds = _seeds.ToImmutableArray();
+
+        // Register channel as singleton, created from service provider
+        _services.AddSingleton<GrpcChannel>(sp => {
+            var loggerFactory = sp.GetService<ILoggerFactory>();
+            var logger = loggerFactory?.CreateLogger<LoadBalancingServiceBuilder>();
+
+            // 1. Create refresh trigger
+            var refreshTrigger = new RefreshTrigger();
+
+            // 2. Create seed channel pool
+            var seedChannelOptions = new GrpcChannelOptions();
+            _configureChannel?.Invoke(seedChannelOptions);
+            var channelPool = new SeedChannelPool(
+                seedChannelOptions,
+                _useTls,
+                loggerFactory?.CreateLogger<SeedChannelPool>());
+
+            // 3. Get topology source from DI
+            IStreamingTopologySource topologySource;
+            if (_streamingSourceFactory is not null) {
+                topologySource = _streamingSourceFactory(sp);
+            }
+            else {
+                var pollingSource = _pollingSourceFactory!(sp);
+                topologySource = new PollingToStreamingAdapter(
+                    pollingSource,
+                    _pollingDelay,
+                    _resilience,
+                    loggerFactory?.CreateLogger<PollingToStreamingAdapter>());
+            }
+
+            // 4. Create factories
+            var resolverFactory = new ClusterResolverFactory(
+                topologySource,
+                seeds,
+                _resilience,
+                channelPool,
+                refreshTrigger,
+                loggerFactory);
+            var lbFactory = new ClusterLoadBalancerFactory(loggerFactory);
+
+            // 5. Create inner service provider for gRPC factories
+            // (separate from the app's service provider)
+            var grpcServices = new ServiceCollection();
+            grpcServices.AddSingleton<ResolverFactory>(resolverFactory);
+            grpcServices.AddSingleton<LoadBalancerFactory>(lbFactory);
+            var grpcServiceProvider = grpcServices.BuildServiceProvider();
+
+            // 6. Create HTTP handler chain
+            var innerHandler = new SocketsHttpHandler {
+                EnableMultipleHttp2Connections = true
+            };
+            var refreshHandler = new RefreshTriggerHandler(
+                innerHandler,
+                _refreshPolicy,
+                refreshTrigger,
+                loggerFactory?.CreateLogger<RefreshTriggerHandler>());
+
+            // 7. Configure channel
+            var channelOptions = new GrpcChannelOptions {
+                ServiceProvider = grpcServiceProvider,
+                ServiceConfig = new ServiceConfig {
+                    LoadBalancingConfigs = { new LoadBalancingConfig(ClusterLoadBalancerFactory.PolicyName) }
+                },
+                HttpHandler = refreshHandler,
+                DisposeHttpClient = true
+            };
+            _configureChannel?.Invoke(channelOptions);
+
+            // 8. Create channel
+            var targetUri = $"{ClusterResolverFactory.SchemeName}://{_primaryEndpoint.Host}";
+            var channel = GrpcChannel.ForAddress(targetUri, channelOptions);
+
+            logger?.LogDebug("Created load-balanced channel via DI for {Target}", _primaryEndpoint);
+
+            return channel;
+        });
+
+        return _services;
+    }
+}
+```
+
+---
+
+### 14.7 Disposal Chain
+
+```
+Channel.Dispose()
+    │
+    ├─► HttpHandler.Dispose() (DisposeHttpClient=true)
+    │       │
+    │       └─► RefreshTriggerHandler.Dispose()
+    │               │
+    │               └─► SocketsHttpHandler.Dispose()
+    │
+    ├─► Resolver.Dispose() (called by gRPC infrastructure)
+    │       │
+    │       └─► CancellationTokenSource.Cancel()
+    │               │
+    │               └─► Subscription task completes
+    │
+    └─► LoadBalancer.Dispose() (called by gRPC infrastructure)
+            │
+            └─► All Subchannels disposed
+
+NOTE: SeedChannelPool is NOT automatically disposed.
+      - Non-DI: User should call builder.DisposeAsync() after channel.Dispose()
+      - DI: Register as hosted service or use IAsyncDisposable pattern
+```
+
+**DI Disposal Pattern:**
+
+```csharp
+// Option 1: IHostedService for proper disposal
+services.AddHostedService<LoadBalancingCleanupService>();
+
+internal sealed class LoadBalancingCleanupService : IHostedService {
+    readonly GrpcChannel _channel;
+
+    public LoadBalancingCleanupService(GrpcChannel channel) => _channel = channel;
+
+    public Task StartAsync(CancellationToken ct) => Task.CompletedTask;
+
+    public async Task StopAsync(CancellationToken ct) {
+        _channel.Dispose();
+        // SeedChannelPool disposal handled internally via captured reference
+    }
+}
+
+// Option 2: Store SeedChannelPool in DI and dispose via IAsyncDisposable
+_services.AddSingleton<SeedChannelPool>(sp => channelPool);
+// ServiceProvider will dispose IAsyncDisposable singletons on shutdown
+```
+
+---
+
+### 14.8 ClusterResolver - Refresh & Thread Safety
+
+```csharp
+internal sealed class ClusterResolver : Resolver, IAsyncDisposable {
+    readonly object _lock = new();
+    CancellationTokenSource? _cts;
+    Task? _subscriptionTask;
+    bool _disposed;
+
+    public ClusterResolver(
+        /* ... other params ... */
+        RefreshTrigger refreshTrigger,
+        ILogger logger) {
+
+        // Subscribe to refresh trigger
+        refreshTrigger.RefreshRequested += OnRefreshRequested;
+    }
+
+    void OnRefreshRequested() {
+        // Thread-safe refresh - can be called from any thread
+        Refresh();
+    }
+
+    public override void Refresh() {
+        lock (_lock) {
+            if (_disposed) return;
+
+            _logger.LogDebug("Refresh requested, restarting subscription");
+
+            // Cancel current subscription
+            _cts?.Cancel();
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+
+            // Start new subscription (fire and forget, errors logged internally)
+            _subscriptionTask = SubscribeLoopAsync(_cts.Token);
+        }
+    }
+
+    protected override void OnStarted() {
+        lock (_lock) {
+            _cts = new CancellationTokenSource();
+            _subscriptionTask = SubscribeLoopAsync(_cts.Token);
+        }
+    }
+
+    public async ValueTask DisposeAsync() {
+        CancellationTokenSource? cts;
+        Task? task;
+
+        lock (_lock) {
+            if (_disposed) return;
+            _disposed = true;
+            cts = _cts;
+            task = _subscriptionTask;
+            _cts = null;
+            _subscriptionTask = null;
+        }
+
+        cts?.Cancel();
+
+        if (task is not null) {
+            try {
+                await task.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) {
+                // Expected
+            }
+        }
+
+        cts?.Dispose();
+    }
+
+    async Task SubscribeLoopAsync(CancellationToken ct) {
+        var seedIndex = 0;
+
+        while (!ct.IsCancellationRequested) {
+            var seed = _seeds[seedIndex];
+
+            try {
+                _logger.DiscoveringCluster(seed);
+                await SubscribeToSeedAsync(seed, ct).ConfigureAwait(false);
+                // Stream ended normally - try next seed
+                _logger.TopologyStreamEmpty(seed);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) {
+                return;
+            }
+            catch (Exception ex) {
+                _logger.TopologyCallFailed(seed, ex);
+            }
+
+            // Round-robin to next seed
+            seedIndex = (seedIndex + 1) % _seeds.Length;
+        }
+    }
+
+    async Task SubscribeToSeedAsync(DnsEndPoint seed, CancellationToken ct) {
+        var channel = _channelPool.GetChannel(seed);
+        var context = new TopologyContext {
+            Channel = channel,
+            CancellationToken = ct,
+            Timeout = _resilience.Timeout,
+            Endpoint = seed
+        };
+
+        var gotAnyTopology = false;
+        await foreach (var topology in _topologySource.SubscribeAsync(context, ct).ConfigureAwait(false)) {
+            gotAnyTopology = true;
+            ProcessTopology(topology);
+        }
+
+        if (!gotAnyTopology)
+            throw new TopologyException(seed, new InvalidOperationException("Stream ended without data"));
+    }
+
+    void ProcessTopology(ClusterTopology topology) {
+        // Skip if unchanged
+        if (topology.Equals(_lastTopology))
+            return;
+
+        // Validate
+        if (topology.IsEmpty)
+            throw new ClusterDiscoveryException(0, _seeds, []);
+
+        if (topology.EligibleCount == 0)
+            throw new NoEligibleNodesException(topology.Count);
+
+        // Log changes
+        var (added, removed) = _lastTopology.ComputeDiff(topology);
+        if (added > 0 || removed > 0)
+            _logger.TopologyChanged(added, removed);
+
+        _lastTopology = topology;
+
+        // Build addresses and update channel state
+        var addresses = BuildAddresses(topology);
+        Listener.OnResult(ResolverResult.ForResult(addresses));
+    }
+}
+```
+
+---
+
+### 14.9 ClusterResolverFactory - Updated
+
+```csharp
+internal sealed class ClusterResolverFactory : ResolverFactory {
+    public const string SchemeName = "cluster";
+
+    readonly IStreamingTopologySource _topologySource;
+    readonly ImmutableArray<DnsEndPoint> _seeds;
+    readonly ResilienceOptions _resilience;
+    readonly SeedChannelPool _channelPool;
+    readonly RefreshTrigger _refreshTrigger;
+    readonly ILoggerFactory? _loggerFactory;
+
+    public ClusterResolverFactory(
+        IStreamingTopologySource topologySource,
+        ImmutableArray<DnsEndPoint> seeds,
+        ResilienceOptions resilience,
+        SeedChannelPool channelPool,
+        RefreshTrigger refreshTrigger,
+        ILoggerFactory? loggerFactory) {
+
+        _topologySource = topologySource;
+        _seeds = seeds;
+        _resilience = resilience;
+        _channelPool = channelPool;
+        _refreshTrigger = refreshTrigger;
+        _loggerFactory = loggerFactory;
+    }
+
+    public override string Name => SchemeName;
+
+    public override Resolver Create(ResolverOptions options) {
+        return new ClusterResolver(
+            _topologySource,
+            _seeds,
+            _channelPool,
+            _resilience,
+            _refreshTrigger,
+            _loggerFactory?.CreateLogger<ClusterResolver>());
+    }
+}
+```
+
+---
+
+### 14.10 SeedChannelPool - Complete Implementation
+
+```csharp
+internal sealed class SeedChannelPool : IAsyncDisposable {
+    readonly ConcurrentDictionary<DnsEndPoint, GrpcChannel> _channels = new();
+    readonly GrpcChannelOptions? _baseOptions;
+    readonly bool _useTls;
+    readonly ILogger? _logger;
+    bool _disposed;
+
+    public SeedChannelPool(GrpcChannelOptions? baseOptions, bool useTls, ILogger? logger) {
+        _baseOptions = baseOptions;
+        _useTls = useTls;
+        _logger = logger;
+    }
+
+    public GrpcChannel GetChannel(DnsEndPoint endpoint) {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        return _channels.GetOrAdd(endpoint, CreateChannel);
+    }
+
+    GrpcChannel CreateChannel(DnsEndPoint endpoint) {
+        _logger?.CreatingSeedChannel(endpoint);
+
+        var scheme = _useTls ? "https" : "http";
+        var address = $"{scheme}://{endpoint.Host}:{endpoint.Port}";
+
+        // Clone base options if provided
+        var options = new GrpcChannelOptions();
+        if (_baseOptions is not null) {
+            options.Credentials = _baseOptions.Credentials;
+            options.MaxReceiveMessageSize = _baseOptions.MaxReceiveMessageSize;
+            options.MaxSendMessageSize = _baseOptions.MaxSendMessageSize;
+            options.MaxRetryAttempts = _baseOptions.MaxRetryAttempts;
+            options.MaxRetryBufferSize = _baseOptions.MaxRetryBufferSize;
+            options.MaxRetryBufferPerCallSize = _baseOptions.MaxRetryBufferPerCallSize;
+            options.CompressionProviders = _baseOptions.CompressionProviders;
+            options.ThrowOperationCanceledOnCancellation = _baseOptions.ThrowOperationCanceledOnCancellation;
+        }
+
+        return GrpcChannel.ForAddress(address, options);
+    }
+
+    public async ValueTask DisposeAsync() {
+        if (_disposed) return;
+        _disposed = true;
+
+        _logger?.DisposingSeedChannelPool(_channels.Count);
+
+        var channels = _channels.Values.ToArray();
+        _channels.Clear();
+
+        foreach (var channel in channels) {
+            try {
+                await channel.ShutdownAsync().ConfigureAwait(false);
+                channel.Dispose();
+            }
+            catch {
+                // Best effort disposal
+            }
+        }
+    }
+}
+```
+
+---
+
+### 14.11 File Structure Update
+
+Add these new files to Section 11:
+
+```
+src/Raging.Grpc.LoadBalancing/
+│
+├── Internal/
+│   ├── RefreshTrigger.cs                   # Coordinator between handler and resolver
+│   ├── RefreshTriggerHandler.cs            # HTTP handler (replaces RefreshTriggerInterceptor)
+│   └── ... (other internal files)
+```
+
+**Note:** `RefreshTriggerInterceptor.cs` is replaced by `RefreshTriggerHandler.cs` for channel-level interception.
+
+---
+
+### 14.12 Updated Usage (No Changes Required)
+
+The wiring is all internal. User code remains simple:
+
+```csharp
+// Non-DI
+var channel = GrpcLoadBalancedChannel.ForAddress("node1:5000", lb => lb
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource(new MyTopologySource()));
+
+var client = new MyService.MyServiceClient(channel);  // Just works!
+await client.DoSomethingAsync(request);
+
+// DI
+services.AddGrpcLoadBalancing("node1:5000")
+    .WithSeeds("node2:5000", "node3:5000")
+    .WithPollingTopologySource<MyTopologySource>()
+    .Build();
+
+// Inject GrpcChannel normally
+public class MyService(GrpcChannel channel) {
+    readonly MyClient _client = new(channel);  // Just works!
 }
 ```
 
