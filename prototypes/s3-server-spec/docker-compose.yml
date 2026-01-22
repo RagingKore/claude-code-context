@@ -1,0 +1,20 @@
+services:
+  s3:
+    build: .
+    ports:
+      - "9000:9000"
+    volumes:
+      - s3-data:/app/s3-data
+    environment:
+      - S3__UseInMemoryStorage=false
+      - S3__RequireAuthentication=false
+      - Logging__LogLevel__Default=Information
+      - Logging__LogLevel__Kurrent.S3=Debug
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  s3-data:
