@@ -27,6 +27,7 @@ public sealed class ConsensusNodeActor : ReceiveActor
     private int _currentLeaderId;
     private long _currentTerm;
     private bool _alive = true;
+    private bool _electionInProgress;
     private int _workItemsProcessed;
 
     // Heartbeat tracking
@@ -35,6 +36,8 @@ public sealed class ConsensusNodeActor : ReceiveActor
     // Timers
     private ICancelable? _heartbeatSchedule;
     private ICancelable? _workSchedule;
+    private ICancelable? _electionDelay;
+    private ICancelable? _electionTimeout;
     private const int HeartbeatIntervalMs = 500;
     private const int WorkTickIntervalMs = 800;
     private const int HeartbeatTimeoutMs = 2000;
@@ -64,6 +67,9 @@ public sealed class ConsensusNodeActor : ReceiveActor
             if (_alive) StartElection();
         });
         Receive<CheckElectionTimeout>(msg => OnCheckElectionTimeout(msg));
+
+        // Akka.NET: Handle internal heartbeat ticks (must be in constructor, not PreStart)
+        Receive<HeartbeatTick>(_ => OnHeartbeatTick());
     }
 
     // ------------------------------------------------------------------
@@ -96,11 +102,8 @@ public sealed class ConsensusNodeActor : ReceiveActor
             Self
         );
 
-        // Akka.NET: Handle internal heartbeat ticks
-        Receive<HeartbeatTick>(_ => OnHeartbeatTick());
-
-        // Trigger initial election after short delay
-        scheduler.ScheduleTellOnce(
+        // Trigger initial election after short delay (store cancelable to avoid AK1004)
+        _electionDelay = scheduler.ScheduleTellOnceCancelable(
             TimeSpan.FromMilliseconds(300 + _nodeId * 100),
             Self,
             new TriggerElection(),
@@ -113,6 +116,8 @@ public sealed class ConsensusNodeActor : ReceiveActor
         _alive = false;
         _heartbeatSchedule?.Cancel();
         _workSchedule?.Cancel();
+        _electionDelay?.Cancel();
+        _electionTimeout?.Cancel();
         _log.Lifecycle(_nodeId, "Stopped");
         base.PostStop();
     }
@@ -142,7 +147,7 @@ public sealed class ConsensusNodeActor : ReceiveActor
 
     private void CheckLeaderHealth()
     {
-        if (_currentLeaderId == _nodeId || _currentLeaderId == 0) return;
+        if (_currentLeaderId == _nodeId || _currentLeaderId == 0 || _electionInProgress) return;
 
         if (_lastHeartbeats.TryGetValue(_currentLeaderId, out var lastSeen))
         {
@@ -171,6 +176,9 @@ public sealed class ConsensusNodeActor : ReceiveActor
 
     private void StartElection()
     {
+        if (_electionInProgress) return;
+        _electionInProgress = true;
+
         var newTerm = _currentTerm + 1;
         _currentTerm = newTerm;
         _log.Election(_nodeId, $"Starting election for term {newTerm}");
@@ -188,7 +196,8 @@ public sealed class ConsensusNodeActor : ReceiveActor
             actorRef.Tell(new ElectionCall(_nodeId, newTerm), Self);
 
         // Schedule timeout — if no higher node responds, we win
-        Context.System.Scheduler.ScheduleTellOnce(
+        _electionTimeout?.Cancel();
+        _electionTimeout = Context.System.Scheduler.ScheduleTellOnceCancelable(
             TimeSpan.FromMilliseconds(1500),
             Self,
             new CheckElectionTimeout(newTerm),
@@ -222,6 +231,8 @@ public sealed class ConsensusNodeActor : ReceiveActor
         // Check if any higher-ID node has heartbeated recently
         if (!HasHigherAliveNode())
             DeclareVictory();
+        else
+            _electionInProgress = false; // Allow re-election later
     }
 
     private bool HasHigherAliveNode()
@@ -233,6 +244,7 @@ public sealed class ConsensusNodeActor : ReceiveActor
 
     private void DeclareVictory()
     {
+        _electionInProgress = false;
         _currentLeaderId = _nodeId;
         _log.Leader(_nodeId, $"*** Elected as LEADER for term {_currentTerm} ***");
 
@@ -245,6 +257,7 @@ public sealed class ConsensusNodeActor : ReceiveActor
     {
         if (!_alive) return;
 
+        _electionInProgress = false;
         _currentLeaderId = msg.LeaderId;
         _currentTerm = Math.Max(_currentTerm, msg.Term);
         _log.Leader(_nodeId, $"Acknowledged Node-{msg.LeaderId} as leader (term {msg.Term})");
@@ -281,6 +294,8 @@ public sealed class ConsensusNodeActor : ReceiveActor
         _alive = false;
         _heartbeatSchedule?.Cancel();
         _workSchedule?.Cancel();
+        _electionDelay?.Cancel();
+        _electionTimeout?.Cancel();
 
         // Akka.NET: Notify peers about our departure
         foreach (var (_, actorRef) in _peers)

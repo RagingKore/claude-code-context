@@ -25,6 +25,7 @@ public sealed class ConsensusNodeActor : IActor
     private int _currentLeaderId;
     private long _currentTerm;
     private bool _alive = true;
+    private bool _electionInProgress;
     private int _workItemsProcessed;
 
     // Heartbeat tracking
@@ -143,7 +144,7 @@ public sealed class ConsensusNodeActor : IActor
 
     private void CheckLeaderHealth(IContext context)
     {
-        if (_currentLeaderId == _nodeId || _currentLeaderId == 0) return;
+        if (_currentLeaderId == _nodeId || _currentLeaderId == 0 || _electionInProgress) return;
 
         if (_lastHeartbeats.TryGetValue(_currentLeaderId, out var lastSeen))
         {
@@ -162,6 +163,9 @@ public sealed class ConsensusNodeActor : IActor
 
     private void StartElection(IContext context)
     {
+        if (_electionInProgress) return;
+        _electionInProgress = true;
+
         var newTerm = _currentTerm + 1;
         _currentTerm = newTerm;
         _log.Election(_nodeId, $"Starting election for term {newTerm}");
@@ -218,6 +222,7 @@ public sealed class ConsensusNodeActor : IActor
 
     private void DeclareVictory(IContext context)
     {
+        _electionInProgress = false;
         _currentLeaderId = _nodeId;
         _log.Leader(_nodeId, $"*** Elected as LEADER for term {_currentTerm} ***");
 
@@ -230,6 +235,7 @@ public sealed class ConsensusNodeActor : IActor
     {
         if (!_alive) return Task.CompletedTask;
 
+        _electionInProgress = false;
         _currentLeaderId = msg.LeaderId;
         _currentTerm = Math.Max(_currentTerm, msg.Term);
         _log.Leader(_nodeId, $"Acknowledged Node-{msg.LeaderId} as leader (term {msg.Term})");

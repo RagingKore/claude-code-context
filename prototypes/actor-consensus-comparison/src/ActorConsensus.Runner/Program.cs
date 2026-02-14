@@ -2,8 +2,8 @@ using ActorConsensus.Contracts;
 using ActorConsensus.ProtoActor;
 using ActorConsensus.AkkaDotNet;
 
-const string separator = new('═', 80);
-const string thinSeparator = new('─', 80);
+var separator = new string('═', 80);
+var thinSeparator = new string('─', 80);
 
 Console.WriteLine(separator);
 Console.WriteLine("  Actor Framework Consensus Comparison");

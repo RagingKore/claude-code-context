@@ -110,6 +110,13 @@ public sealed class ProtoActorCluster : IConsensusCluster
 
     public async ValueTask DisposeAsync()
     {
+        // Stop all node actors first (cancels their internal timers)
+        foreach (var (_, pid) in _nodePids)
+            _system?.Root.Send(pid, new StopNode());
+
+        // Brief delay to let stop messages process
+        await Task.Delay(200);
+
         if (_system is not null)
         {
             // Proto.Actor: Shutdown the entire actor system
