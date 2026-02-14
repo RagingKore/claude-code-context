@@ -2,6 +2,7 @@ using Akka.Actor;
 using Akka.Cluster;
 using Akka.Cluster.Hosting;
 using Akka.Cluster.Hosting.SBR;
+using Akka.Event;
 using Akka.Hosting;
 using Akka.Remote.Hosting;
 using Microsoft.Extensions.DependencyInjection;
@@ -40,7 +41,10 @@ for (var i = 1; i <= nodeCount; i++)
             services.AddAkka(systemName, builder =>
             {
                 builder
-                    .AddHocon("akka.loglevel = WARNING", HoconAddMode.Prepend)
+                    .ConfigureLoggers(setup =>
+                    {
+                        setup.LogLevel = LogLevel.WarningLevel;
+                    })
 
                     .WithRemoting("127.0.0.1", port)
 
@@ -50,15 +54,6 @@ for (var i = 1; i <= nodeCount; i++)
                         Roles = ["node"],
                         SplitBrainResolver = SplitBrainResolverOption.Default
                     })
-
-                    // Fast failure detection for demo purposes
-                    .AddHocon("""
-                        akka.cluster.failure-detector {
-                            heartbeat-interval = 1s
-                            acceptable-heartbeat-pause = 3s
-                            threshold = 8
-                        }
-                        """, HoconAddMode.Prepend)
 
                     // The singleton — exactly one instance across the entire cluster.
                     // WithSingleton creates both the ClusterSingletonManager and
