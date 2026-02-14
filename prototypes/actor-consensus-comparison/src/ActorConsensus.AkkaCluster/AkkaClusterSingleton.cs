@@ -1,24 +1,31 @@
 using ActorConsensus.Contracts;
 using Akka.Actor;
 using Akka.Cluster;
-using Akka.Cluster.Tools.Singleton;
-using Akka.Configuration;
+using Akka.Cluster.Hosting;
+using Akka.Cluster.Hosting.SBR;
+using Akka.Hosting;
+using Akka.Remote.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace ActorConsensus.AkkaCluster;
 
 /// <summary>
-/// Orchestrator that creates 3 Akka.NET ActorSystems forming a real cluster.
+/// Orchestrator that creates 3 Akka.NET ActorSystems forming a real cluster,
+/// configured entirely through the Akka.Hosting fluent API (no HOCON).
 ///
 /// Instead of the Bully algorithm, this uses:
 ///   - Akka.Cluster gossip protocol for membership and failure detection
-///   - ClusterSingletonManager for automatic leader placement and failover
+///   - ClusterSingletonManager via WithSingleton() for automatic leader placement
 ///   - Cluster events for leader tracking (no manual heartbeat/timeout)
+///   - Microsoft.Extensions.Hosting for lifecycle management
 ///
-/// Each ActorSystem runs on its own TCP port (simulating 3 separate processes).
+/// Each IHost runs its own ActorSystem on a separate TCP port (simulating 3 processes).
 /// </summary>
 public sealed class AkkaClusterSingleton : IConsensusCluster
 {
     private readonly ConsensusLog _log;
+    private readonly Dictionary<int, IHost> _hosts = [];
     private readonly Dictionary<int, ActorSystem> _systems = [];
     private readonly Dictionary<int, IActorRef> _nodeActors = [];
     private readonly Dictionary<int, Address> _nodeAddresses = [];
@@ -39,70 +46,80 @@ public sealed class AkkaClusterSingleton : IConsensusCluster
 
     public async Task StartAsync(CancellationToken ct = default)
     {
-        // Seed nodes — all 3 nodes know about each other at startup
-        var seedNodes = string.Join(",",
-            Enumerable.Range(0, 3).Select(i =>
-                $"\"akka.tcp://{SystemName}@127.0.0.1:{BasePort + i}\""));
+        // Seed node addresses — all 3 nodes know about each other at startup
+        var seedNodes = Enumerable.Range(0, 3)
+            .Select(i => $"akka.tcp://{SystemName}@127.0.0.1:{BasePort + i}")
+            .ToArray();
 
         for (var i = 1; i <= 3; i++)
         {
+            var nodeId = i;
             var port = BasePort + i - 1;
+            var log = _log;
 
-            var config = ConfigurationFactory.ParseString($$"""
-                akka {
-                    # Suppress verbose remote/cluster logging for clean demo output
-                    loglevel = WARNING
+            // Each node is a separate IHost with its own ActorSystem
+            var host = new HostBuilder()
+                .ConfigureServices(services =>
+                {
+                    services.AddAkka(SystemName, builder =>
+                    {
+                        builder
+                            // Suppress verbose remote/cluster logging for clean demo output
+                            .AddHocon("akka.loglevel = WARNING", HoconAddMode.Prepend)
 
-                    actor.provider = cluster
+                            // Akka.Remote — TCP transport on a unique port per node
+                            .WithRemoting("127.0.0.1", port)
 
-                    remote.dot-netty.tcp {
-                        hostname = "127.0.0.1"
-                        port = {{port}}
-                    }
+                            // Akka.Cluster — gossip-based membership replaces manual heartbeat
+                            .WithClustering(new ClusterOptions
+                            {
+                                SeedNodes = seedNodes,
+                                Roles = ["node"],
+                                SplitBrainResolver = SplitBrainResolverOption.Default
+                            })
 
-                    cluster {
-                        seed-nodes = [{{seedNodes}}]
-                        roles = ["node"]
+                            // Failure detector tuned for fast demo — production values would be higher
+                            .AddHocon("""
+                                akka.cluster.failure-detector {
+                                    heartbeat-interval = 1s
+                                    acceptable-heartbeat-pause = 3s
+                                    threshold = 8
+                                }
+                                """, HoconAddMode.Prepend)
 
-                        # Split-brain resolver — required for auto-downing unreachable nodes
-                        downing-provider-class = "Akka.Cluster.SBR.SplitBrainResolverProvider, Akka.Cluster"
-                        split-brain-resolver {
-                            active-strategy = keep-majority
-                            stable-after = 5s
-                        }
+                            // ClusterSingleton — replaces the entire Bully election algorithm.
+                            // WithSingleton creates both the ClusterSingletonManager (on every node)
+                            // and a ClusterSingletonProxy (registered in ActorRegistry).
+                            .WithSingleton<LeaderSingletonActor>(
+                                "leader-singleton",
+                                (_, _, _) => LeaderSingletonActor.CreateProps(log))
 
-                        # Tuned for fast demo — production values would be higher
-                        failure-detector {
-                            heartbeat-interval = 1s
-                            acceptable-heartbeat-pause = 3s
-                            threshold = 8
-                        }
-                    }
-                }
-                """);
+                            // Local node actor — subscribes to cluster events, processes work
+                            .WithActors((system, registry) =>
+                            {
+                                var nodeActor = system.ActorOf(
+                                    ClusterNodeActor.CreateProps(nodeId, log),
+                                    $"node-{nodeId}");
+                                registry.TryRegister<ClusterNodeActor>(nodeActor);
+                            });
+                    });
+                })
+                .Build();
 
-            var system = ActorSystem.Create(SystemName, config);
+            await host.StartAsync(ct);
+
+            var system = host.Services.GetRequiredService<ActorSystem>();
+
+            _hosts[i] = host;
             _systems[i] = system;
             _aliveNodes.Add(i);
+            _nodeAddresses[i] = Cluster.Get(system).SelfAddress;
 
-            var cluster = Cluster.Get(system);
-            _nodeAddresses[i] = cluster.SelfAddress;
+            // Get node actor from the hosting ActorRegistry
+            var registry = host.Services.GetRequiredService<ActorRegistry>();
+            _nodeActors[i] = registry.Get<ClusterNodeActor>();
 
-            // ClusterSingletonManager — the framework handles leader placement and failover.
-            // Replaces the entire Bully election algorithm.
-            var singletonProps = ClusterSingletonManager.Props(
-                singletonProps: LeaderSingletonActor.CreateProps(_log),
-                terminationMessage: PoisonPill.Instance,
-                settings: ClusterSingletonManagerSettings.Create(system));
-
-            system.ActorOf(singletonProps, "leader-singleton");
-
-            // Local node actor — subscribes to cluster events, processes work
-            var nodeActor = system.ActorOf(
-                ClusterNodeActor.CreateProps(i, _log), $"node-{i}");
-            _nodeActors[i] = nodeActor;
-
-            _log.Lifecycle(i, $"ActorSystem created on port {port}");
+            _log.Lifecycle(i, $"Host started on port {port}");
         }
 
         // Wait for cluster gossip to converge and leader to be elected
@@ -122,22 +139,18 @@ public sealed class AkkaClusterSingleton : IConsensusCluster
         var leaderId = _nodeAddresses
             .FirstOrDefault(kvp => kvp.Value == leaderAddress).Key;
 
-        if (leaderId == 0 || !_systems.TryGetValue(leaderId, out var leaderSystem))
+        if (leaderId == 0 || !_hosts.TryGetValue(leaderId, out var leaderHost))
             return;
 
-        _log.Lifecycle(leaderId, "Killing leader node — leaving cluster gracefully");
+        _log.Lifecycle(leaderId, "Killing leader node — stopping host");
         _aliveNodes.Remove(leaderId);
 
-        // Graceful leave triggers fast handover (~1s) vs abrupt crash (~3-10s for failure detector).
-        // The ClusterSingletonManager on the remaining oldest node will start a new singleton.
-        var cluster = Cluster.Get(leaderSystem);
-        cluster.Leave(cluster.SelfAddress);
+        // Host.StopAsync triggers CoordinatedShutdown → cluster leave → singleton migration.
+        // Much cleaner than manual Cluster.Leave() + System.Terminate().
+        await leaderHost.StopAsync(ct);
 
-        // Wait for leave to propagate and singleton to migrate
         await Task.Delay(3000, ct);
-
-        await leaderSystem.Terminate();
-        _log.Lifecycle(leaderId, "ActorSystem terminated");
+        _log.Lifecycle(leaderId, "Host stopped");
     }
 
     public async Task<ClusterStatus> GetStatusAsync(CancellationToken ct = default)
@@ -182,18 +195,14 @@ public sealed class AkkaClusterSingleton : IConsensusCluster
 
     public async ValueTask DisposeAsync()
     {
-        foreach (var (nodeId, system) in _systems)
+        foreach (var (nodeId, host) in _hosts)
         {
             try
             {
                 if (_aliveNodes.Contains(nodeId))
-                {
-                    var cluster = Cluster.Get(system);
-                    cluster.Leave(cluster.SelfAddress);
-                    await Task.Delay(500);
-                }
+                    await host.StopAsync();
 
-                await system.Terminate();
+                host.Dispose();
             }
             catch
             {
@@ -201,6 +210,7 @@ public sealed class AkkaClusterSingleton : IConsensusCluster
             }
         }
 
+        _hosts.Clear();
         _systems.Clear();
         _nodeActors.Clear();
         _aliveNodes.Clear();
