@@ -13,6 +13,7 @@
     <ProjectReference Include="..\ActorConsensus.Contracts\ActorConsensus.Contracts.csproj" />
     <ProjectReference Include="..\ActorConsensus.ProtoActor\ActorConsensus.ProtoActor.csproj" />
     <ProjectReference Include="..\ActorConsensus.AkkaDotNet\ActorConsensus.AkkaDotNet.csproj" />
+    <ProjectReference Include="..\ActorConsensus.AkkaCluster\ActorConsensus.AkkaCluster.csproj" />
   </ItemGroup>
 
 </Project>

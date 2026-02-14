@@ -1,17 +1,18 @@
 using ActorConsensus.Contracts;
 using ActorConsensus.ProtoActor;
 using ActorConsensus.AkkaDotNet;
+using ActorConsensus.AkkaCluster;
 
 var separator = new string('═', 80);
 var thinSeparator = new string('─', 80);
 
 Console.WriteLine(separator);
 Console.WriteLine("  Actor Framework Consensus Comparison");
-Console.WriteLine("  Proto.Actor vs Akka.NET — 3-Node Bully Leader Election");
+Console.WriteLine("  Proto.Actor vs Akka.NET (Bully) vs Akka.NET (Cluster Singleton)");
 Console.WriteLine(separator);
 Console.WriteLine();
 
-// Run Proto.Actor first, then Akka.NET, so output doesn't interleave
+// Run each implementation sequentially so output doesn't interleave
 await RunClusterScenario(new ProtoActorCluster());
 
 Console.WriteLine();
@@ -19,6 +20,12 @@ Console.WriteLine(separator);
 Console.WriteLine();
 
 await RunClusterScenario(new AkkaCluster());
+
+Console.WriteLine();
+Console.WriteLine(separator);
+Console.WriteLine();
+
+await RunClusterScenario(new AkkaClusterSingleton());
 
 Console.WriteLine();
 Console.WriteLine(separator);

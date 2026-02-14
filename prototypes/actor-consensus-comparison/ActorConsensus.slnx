@@ -3,6 +3,7 @@
     <Project Path="src/ActorConsensus.Contracts/ActorConsensus.Contracts.csproj" />
     <Project Path="src/ActorConsensus.ProtoActor/ActorConsensus.ProtoActor.csproj" />
     <Project Path="src/ActorConsensus.AkkaDotNet/ActorConsensus.AkkaDotNet.csproj" />
+    <Project Path="src/ActorConsensus.AkkaCluster/ActorConsensus.AkkaCluster.csproj" />
     <Project Path="src/ActorConsensus.Runner/ActorConsensus.Runner.csproj" />
   </Folder>
 </Solution>

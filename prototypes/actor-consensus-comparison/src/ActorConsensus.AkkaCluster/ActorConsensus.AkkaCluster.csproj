@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+    <RootNamespace>ActorConsensus.AkkaCluster</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Akka.Cluster" Version="1.5.59" />
+    <PackageReference Include="Akka.Cluster.Tools" Version="1.5.59" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ActorConsensus.Contracts\ActorConsensus.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>
