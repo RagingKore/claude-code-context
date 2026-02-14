@@ -1,0 +1,22 @@
+{
+  "name": "dotnet-nuget-proxy",
+  "description": "Enables .NET development in Claude Code web sessions by fixing NuGet proxy authentication. Provides a C# credential provider plugin with embedded proxy bridge, SessionStart hook for automatic setup, and comprehensive troubleshooting.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Claude Code Community",
+    "email": "community@claude.ai"
+  },
+  "keywords": [
+    ".NET",
+    "NuGet",
+    "proxy",
+    "authentication",
+    "troubleshooting",
+    "development",
+    "containerized",
+    "enterprise"
+  ],
+  "repository": "https://github.com/logiclabs/dotnet-nuget-proxy-skill",
+  "license": "MIT",
+  "homepage": "https://github.com/logiclabs/dotnet-nuget-proxy-skill#readme"
+}

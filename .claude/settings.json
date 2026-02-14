@@ -1,0 +1,17 @@
+{
+  "enabledPlugins": {
+    "dotnet-nuget-proxy@dotnet-nuget-proxy": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR\"/.claude/plugins/dotnet-nuget-proxy-skill/hooks/session-start.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
