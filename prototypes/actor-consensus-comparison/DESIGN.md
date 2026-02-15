@@ -658,141 +658,215 @@ With naive hashing (`key % N`), changing N means almost every key maps to a diff
 
 Consistent hashing guarantees that when a server is added or removed, only **K/N** keys need to move (K = total keys, N = total servers). Add a 4th server to 3? Only ~25% of keys move.
 
-### How the Ring Works
+### How the Ring Works — 3 Workers, 6 Partitions
 
-Imagine a circle (ring) with positions 0 to 2^32-1 (the output range of a 32-bit hash):
+The ring is a circle of numbers from 0 to 99 (in reality 0 to 2^32-1, but let's use 0-99 to keep it simple). Everything — workers AND partitions — gets hashed onto this circle.
 
-```
-                    0
-                    │
-            ┌───────┼───────┐
-           /        │        \
-          /         │         \
-    3/4 · 2^32      │      1/4 · 2^32
-         |          │          |
-          \         │         /
-           \        │        /
-            └───────┼───────┘
-                    │
-                1/2 · 2^32
-```
-
-**Step 1 — Place workers on the ring:**
-
-Each worker hashes its ID to a position on the ring:
+**Step 1 — Hash the workers onto the ring:**
 
 ```
-  hash("paris")    = 0x1A00_0000  (≈ position 436M)
-  hash("sydney")   = 0x7B00_0000  (≈ position 2068M)
-  hash("virginia") = 0xC500_0000  (≈ position 3305M)
-
-                     0
-                     │
-                Paris (0x1A)
-                /              \
-              /                  \
-  Virginia (0xC5)          Sydney (0x7B)
-              \                  /
-                \              /
-                 ──────────────
+  hash("paris")    = 15
+  hash("sydney")   = 48
+  hash("virginia") = 79
 ```
 
-**Step 2 — Place partitions on the ring:**
-
-Each partition hashes onto the same ring:
+Place them on the circle:
 
 ```
-  hash("partition-0") = 0x0F00_0000
-  hash("partition-1") = 0x3200_0000
-  hash("partition-2") = 0x5500_0000
-  hash("partition-3") = 0x8800_0000
-  hash("partition-4") = 0xA100_0000
-  hash("partition-5") = 0xD900_0000
-  hash("partition-6") = 0xE200_0000
-  hash("partition-7") = 0xF500_0000
+                       0
+                       │
+                  15 Paris
+                /           \
+              /               \
+    79 Virginia            48 Sydney
+              \               /
+                \           /
+                  ─────────
+                      50
 ```
 
-**Step 3 — Assignment rule:**
-
-Each partition is assigned to the **next worker clockwise** on the ring:
+**Step 2 — Hash the partitions onto the ring:**
 
 ```
-                        0
-                        │
-                   P0 ──┤
-                  Paris (0x1A)
-               /    │  P1        \
-             /      │              \
-  P7 ─ P6 ─ P5     │          P2    Sydney (0x7B)
-  Virginia (0xC5)   │             P3 ─ P4
-             \      │              /
-               \    │            /
-                 ──────────────
-
-  Assignments:
-    Paris:    P0, P1          (between Virginia and Paris on the ring)
-    Sydney:   P2, P3, P4      (between Paris and Sydney)
-    Virginia: P5, P6, P7      (between Sydney and Virginia)
+  hash("P0") = 5
+  hash("P1") = 22
+  hash("P2") = 37
+  hash("P3") = 55
+  hash("P4") = 68
+  hash("P5") = 90
 ```
 
-**Step 4 — Worker leaves (Sydney crashes):**
+Now place everything on the same circle:
 
-Only Sydney's partitions need reassignment. They go to the next worker clockwise after Sydney's position, which is Virginia:
+```
+                         0
+                    P0(5)│
+                  15 Paris
+                /  P1(22)    \
+              /    P2(37)      \
+    79 Virginia            48 Sydney
+        P5(90)\    P3(55)      /
+               \   P4(68)    /
+                  ─────────
+                      50
+```
+
+**Step 3 — The assignment rule: walk clockwise, first worker you hit owns it.**
+
+Starting from each partition's position, walk clockwise around the ring. The first worker you bump into owns that partition:
+
+```
+  P0 at 5  ──clockwise──► Paris at 15     ✓ Paris owns P0
+  P1 at 22 ──clockwise──► Sydney at 48    ✓ Sydney owns P1
+  P2 at 37 ──clockwise──► Sydney at 48    ✓ Sydney owns P2
+  P3 at 55 ──clockwise──► Virginia at 79  ✓ Virginia owns P3
+  P4 at 68 ──clockwise──► Virginia at 79  ✓ Virginia owns P4
+  P5 at 90 ──clockwise──► (wrap!) Paris at 15  ✓ Paris owns P5
+```
+
+Note P5: at position 90, walking clockwise goes 91, 92, ... 99, 0, 1, ... 15 — wraps around to Paris.
+
+**Final assignment:**
+
+```
+  Paris:    P0, P5      (2 partitions)
+  Sydney:   P1, P2      (2 partitions)
+  Virginia: P3, P4      (2 partitions)
+```
+
+Perfectly even here. In practice with real hash functions, it won't always be this clean — that's what virtual nodes fix (more on that below).
+
+**Step 4 — Sydney crashes. What happens?**
+
+Remove Sydney (position 48) from the ring. Now P1 and P2 need new owners. Walk clockwise from their positions again:
+
+```
+  P0 at 5  ──clockwise──► Paris at 15      (unchanged)
+  P1 at 22 ──clockwise──► Virginia at 79   ← was Sydney, now Virginia
+  P2 at 37 ──clockwise──► Virginia at 79   ← was Sydney, now Virginia
+  P3 at 55 ──clockwise──► Virginia at 79   (unchanged)
+  P4 at 68 ──clockwise──► Virginia at 79   (unchanged)
+  P5 at 90 ──clockwise──► Paris at 15      (unchanged)
+```
 
 ```
   Before:                          After Sydney dies:
-    Paris:    P0, P1                 Paris:    P0, P1         (unchanged)
-    Sydney:   P2, P3, P4   ──►      Virginia: P2, P3, P4, P5, P6, P7
-    Virginia: P5, P6, P7
+  ─────────                        ─────────────────
+  Paris:    P0, P5  (2)            Paris:    P0, P5          (unchanged ✓)
+  Sydney:   P1, P2  (2)  ──►      Virginia: P1, P2, P3, P4  (got Sydney's)
+  Virginia: P3, P4  (2)
 
-  Only P2, P3, P4 moved. P0, P1, P5, P6, P7 stayed put.
+  Moved: P1, P2 (only Sydney's partitions)
+  Stayed: P0, P3, P4, P5 (everyone else's partitions — untouched)
 ```
 
-**Step 5 — New worker joins (Tokyo):**
+This is the key property: **only the dead worker's partitions move.** Paris doesn't care that Sydney died — its partitions are unaffected.
+
+But notice the problem: Virginia now has 4 partitions, Paris has 2. The load is uneven. With a real hash ring this gets worse — the next clockwise neighbor always absorbs ALL of the dead worker's load instead of spreading it.
+
+**Step 5 — Sydney comes back. What happens?**
+
+Re-add Sydney at position 48:
 
 ```
-  hash("tokyo") = 0x9500_0000  (between P4 and P5 on the ring)
+  P1 at 22 ──clockwise──► Sydney at 48    ← back to Sydney
+  P2 at 37 ──clockwise──► Sydney at 48    ← back to Sydney
+```
 
+Everything returns to exactly what it was. **Same hash, same position, same assignment.** This is the stickiness property — the assignment is a pure function of the ring state.
+
+**Step 6 — New worker Tokyo joins at position 60.**
+
+```
+  hash("tokyo") = 60
+```
+
+Walk clockwise from every partition again:
+
+```
+  P0 at 5  ──clockwise──► Paris at 15      (unchanged)
+  P1 at 22 ──clockwise──► Sydney at 48     (unchanged)
+  P2 at 37 ──clockwise──► Sydney at 48     (unchanged)
+  P3 at 55 ──clockwise──► Tokyo at 60      ← was Virginia, now Tokyo
+  P4 at 68 ──clockwise──► Virginia at 79   (unchanged)
+  P5 at 90 ──clockwise──► Paris at 15      (unchanged)
+```
+
+```
   Before:                          After Tokyo joins:
-    Paris:    P0, P1                 Paris:    P0, P1         (unchanged)
-    Sydney:   P2, P3, P4            Sydney:   P2, P3         (lost P4)
-    Virginia: P5, P6, P7            Tokyo:    P4              (got P4 from Sydney)
-                                     Virginia: P5, P6, P7     (unchanged)
+  ─────────                        ─────────────────
+  Paris:    P0, P5  (2)            Paris:    P0, P5  (2)     (unchanged ✓)
+  Sydney:   P1, P2  (2)           Sydney:   P1, P2  (2)     (unchanged ✓)
+  Virginia: P3, P4  (2)           Virginia: P4       (1)     (lost P3)
+                                   Tokyo:    P3       (1)     (got P3 from Virginia)
 
-  Only P4 moved. Everything else stayed.
+  Moved: P3 only (1 partition!)
+  Stayed: P0, P1, P2, P4, P5 (5 of 6 partitions — untouched)
 ```
+
+Tokyo "steals" only the partitions that fall between it and the previous worker counter-clockwise (Virginia). Minimal disruption.
+
+**Why this matters for our use case:** When a new worker joins your geo cluster, it doesn't cause a full rebalance. Only a fraction of partitions (roughly 1/N) move to the new worker. Workers that were happily processing their partitions continue without interruption.
 
 ### The Virtual Node Problem
 
-With only 3 workers, the ring is unevenly divided. One worker might own 50% of the ring, another 15%. This is because hash functions don't guarantee even spacing with only 3 points.
-
-**Solution: Virtual nodes.** Each worker places **multiple points** on the ring:
+In our clean example, each worker got exactly 2 partitions. That was luck. With real hash functions the ring arcs between workers are unequal. Imagine instead:
 
 ```
-  Instead of:
-    hash("paris") → 1 position
+  hash("paris")    = 10
+  hash("sydney")   = 15    ← only 5 apart from Paris!
+  hash("virginia") = 80
 
-  Use:
-    hash("paris-vn0") → position A
-    hash("paris-vn1") → position B
-    hash("paris-vn2") → position C
-    ...
-    hash("paris-vn149") → position Z
-
-  With 150 virtual nodes per worker × 3 workers = 450 points on the ring.
-  Distribution is much more even.
+  Paris owns:     arc 80→10 = 30% of the ring
+  Sydney owns:    arc 10→15 = 5% of the ring     ← barely anything!
+  Virginia owns:  arc 15→80 = 65% of the ring    ← overloaded
 ```
+
+With 6 partitions, Virginia would likely get 4, Paris would get 2, Sydney might get 0. Terrible distribution.
+
+**Solution: Virtual nodes.** Instead of placing each worker at 1 position, place them at **many** positions:
+
+```
+  Paris gets 4 virtual nodes:
+    hash("paris-vn0") = 10
+    hash("paris-vn1") = 35
+    hash("paris-vn2") = 62
+    hash("paris-vn3") = 88
+
+  Sydney gets 4 virtual nodes:
+    hash("sydney-vn0") = 15
+    hash("sydney-vn1") = 42
+    hash("sydney-vn2") = 71
+    hash("sydney-vn3") = 95
+
+  Virginia gets 4 virtual nodes:
+    hash("virginia-vn0") = 22
+    hash("virginia-vn1") = 50
+    hash("virginia-vn2") = 80
+    hash("virginia-vn3") = 3
+
+  Ring now has 12 points instead of 3:
+
+  Pos:  3(V)  10(P)  15(S)  22(V)  35(P)  42(S)  50(V)  62(P)  71(S)  80(V)  88(P)  95(S)
+        ─────────────────────────────────────────────────────────────────────────────────────►
+
+  Arcs: V=7  P=5   S=7    V=13   P=7    S=8    V=12   P=9    S=9    V=8    P=7    S=5
+```
+
+Now the ring is much more evenly divided. Each worker's total arc coverage is roughly 33%. The more virtual nodes, the more even it gets.
+
+**How partition assignment works with virtual nodes:** Same rule — walk clockwise, first virtual node you hit determines the owner. If you hit `sydney-vn2`, Sydney owns that partition. The "virtual" part is just for placement; ownership maps back to the real worker.
 
 **Trade-offs of virtual node count:**
 
-| Virtual Nodes/Worker | Distribution Evenness | Membership State Size | Rebalance Granularity |
+| Virtual Nodes/Worker | Distribution Evenness | Ring Size (3 workers) | Rebalance Granularity |
 |---|---|---|---|
-| 1 | Terrible (high variance) | Tiny (3 entries) | Coarse (entire arc moves) |
-| 10 | Poor | Small | Moderate |
-| 100 | Good (~5% variance) | Medium (300 entries) | Fine |
-| 150+ | Excellent (~1-2% variance) | Larger | Very fine |
+| 1 | Terrible (high variance) | 3 points | Coarse — whole arc moves |
+| 10 | Poor | 30 points | Moderate |
+| 100 | Good (~5% variance) | 300 points | Fine |
+| 150+ | Excellent (~1-2% variance) | 450+ points | Very fine |
 
-This is the **main tuning knob** of consistent hashing, and it's the thing that makes rendezvous hashing (Option 6) attractive — HRW needs no virtual nodes and achieves even distribution naturally.
+This is the **main tuning knob** of consistent hashing — and the thing that makes rendezvous hashing (Option 6) attractive. HRW needs no virtual nodes and achieves even distribution naturally by computing a hash for every (partition, worker) pair.
 
 ### Implementation in C# (Conceptual)
 
