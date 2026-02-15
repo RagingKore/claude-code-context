@@ -14,6 +14,7 @@
     <ProjectReference Include="..\ActorConsensus.ProtoActor\ActorConsensus.ProtoActor.csproj" />
     <ProjectReference Include="..\ActorConsensus.AkkaDotNet\ActorConsensus.AkkaDotNet.csproj" />
     <ProjectReference Include="..\ActorConsensus.AkkaCluster\ActorConsensus.AkkaCluster.csproj" />
+    <ProjectReference Include="..\ActorConsensus.AkkaWorker\ActorConsensus.AkkaWorker.csproj" />
   </ItemGroup>
 
 </Project>

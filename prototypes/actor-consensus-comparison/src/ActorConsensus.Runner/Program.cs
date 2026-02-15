@@ -2,13 +2,14 @@ using ActorConsensus.Contracts;
 using ActorConsensus.ProtoActor;
 using ActorConsensus.AkkaDotNet;
 using ActorConsensus.AkkaCluster;
+using ActorConsensus.AkkaWorker;
 
 var separator = new string('═', 80);
 var thinSeparator = new string('─', 80);
 
 Console.WriteLine(separator);
 Console.WriteLine("  Actor Framework Consensus Comparison");
-Console.WriteLine("  Proto.Actor vs Akka.NET (Bully) vs Akka.NET (Cluster Singleton)");
+Console.WriteLine("  Proto.Actor vs Akka.NET (Bully) vs Akka.NET (Cluster Singleton) vs Akka.NET (Gossip Partitions)");
 Console.WriteLine(separator);
 Console.WriteLine();
 
@@ -26,6 +27,12 @@ Console.WriteLine(separator);
 Console.WriteLine();
 
 await RunClusterScenario(new AkkaClusterSingleton());
+
+Console.WriteLine();
+Console.WriteLine(separator);
+Console.WriteLine();
+
+await RunClusterScenario(new AkkaWorkerCluster());
 
 Console.WriteLine();
 Console.WriteLine(separator);
