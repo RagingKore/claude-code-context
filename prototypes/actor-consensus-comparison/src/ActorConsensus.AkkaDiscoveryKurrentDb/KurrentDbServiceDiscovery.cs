@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.ComponentModel;
 using Akka.Actor;
 using Akka.Configuration;
 using Akka.Discovery;
@@ -12,26 +13,10 @@ namespace ActorConsensus.AkkaDiscoveryKurrentDb;
 /// Each node writes periodic <see cref="NodeHeartbeat"/> events to a shared discovery stream.
 /// <see cref="Lookup"/> returns all nodes whose last heartbeat is within the configured TTL.
 ///
-/// <para><b>HOCON configuration:</b></para>
+/// <para><b>Usage:</b></para>
 /// <code>
-/// akka.discovery {
-///   method = kurrentdb
-///   kurrentdb {
-///     class = "ActorConsensus.AkkaDiscoveryKurrentDb.KurrentDbServiceDiscovery, ActorConsensus.AkkaDiscoveryKurrentDb"
-///     connection-string = "esdb://localhost:2113?tls=false"
-///     service-name = "my-service"
-///     heartbeat-interval = 2s
-///     heartbeat-ttl = 10s
-///     stream-prefix = "discovery-"
-///     public-hostname = "127.0.0.1"
-///     public-port = 4053
-///   }
-/// }
-/// </code>
-///
-/// <para><b>Akka.Hosting:</b></para>
-/// <code>
-/// builder.WithKurrentDbDiscovery(options => {
+/// builder.WithKurrentDbDiscovery(options =>
+/// {
 ///     options.ConnectionString = "esdb://localhost:2113?tls=false";
 ///     options.PublicHostname = "127.0.0.1";
 ///     options.PublicPort = 4053;
@@ -45,30 +30,23 @@ public sealed class KurrentDbServiceDiscovery : ServiceDiscovery
     private readonly ILoggingAdapter _log;
 
     /// <summary>
-    /// Constructor called by the Akka.Discovery loader.
-    /// The loader reads <c>akka.discovery.kurrentdb.class</c> and tries
-    /// <c>ctor(ExtendedActorSystem, Config)</c> first.
+    /// Called by the Akka.Discovery framework via reflection.
+    /// Use <see cref="AkkaHostingExtensions.WithKurrentDbDiscovery"/> to configure.
     /// </summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
     public KurrentDbServiceDiscovery(ExtendedActorSystem system, Config config)
     {
         _log = Logging.GetLogger(system, typeof(KurrentDbServiceDiscovery));
 
-        _settings = KurrentDbDiscoverySettings.FromConfig(config);
+        // Settings are passed through the static registry from WithKurrentDbDiscovery(),
+        // not through config values. The config only carries the registry key.
+        var settingsKey = config.GetString("settings-key", "");
 
-        // Resolve hostname if not explicitly configured
-        if (string.IsNullOrEmpty(_settings.PublicHostname))
-        {
-            _settings = new KurrentDbDiscoverySettings
-            {
-                ConnectionString = _settings.ConnectionString,
-                ServiceName = _settings.ServiceName,
-                HeartbeatInterval = _settings.HeartbeatInterval,
-                HeartbeatTtl = _settings.HeartbeatTtl,
-                StreamPrefix = _settings.StreamPrefix,
-                PublicHostname = System.Net.Dns.GetHostName(),
-                PublicPort = _settings.PublicPort,
-            };
-        }
+        _settings = string.IsNullOrEmpty(settingsKey)
+            ? throw new InvalidOperationException(
+                "KurrentDB Discovery must be configured via builder.WithKurrentDbDiscovery(). " +
+                "Direct configuration is not supported.")
+            : KurrentDbDiscoverySetup.Resolve(settingsKey);
 
         _log.Info(
             "KurrentDB Discovery starting — stream [{0}], node [{1}], heartbeat every {2}s, TTL {3}s",
@@ -77,12 +55,10 @@ public sealed class KurrentDbServiceDiscovery : ServiceDiscovery
             _settings.HeartbeatInterval.TotalSeconds,
             _settings.HeartbeatTtl.TotalSeconds);
 
-        // Spawn the membership actor under /system so it's managed by the ActorSystem lifecycle
         _membershipActor = system.SystemActorOf(
             MembershipActor.CreateProps(_settings),
             "kurrentdb-discovery-membership");
 
-        // Register coordinated shutdown to write a NodeLeft event
         var coordinatedShutdown = CoordinatedShutdown.Get(system);
         coordinatedShutdown.AddTask(
             CoordinatedShutdown.PhaseClusterExiting,
@@ -91,7 +67,6 @@ public sealed class KurrentDbServiceDiscovery : ServiceDiscovery
             {
                 try
                 {
-                    // Give the actor a chance to write the leave event
                     await _membershipActor.GracefulStop(TimeSpan.FromSeconds(5));
                 }
                 catch

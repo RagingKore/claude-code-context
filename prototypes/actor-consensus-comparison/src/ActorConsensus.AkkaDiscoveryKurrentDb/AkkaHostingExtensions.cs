@@ -3,14 +3,14 @@ using Akka.Hosting;
 namespace ActorConsensus.AkkaDiscoveryKurrentDb;
 
 /// <summary>
-/// Options for configuring KurrentDB-backed service discovery via Akka.Hosting.
+/// Options for configuring KurrentDB-backed service discovery.
 /// </summary>
 public sealed class KurrentDbDiscoveryOptions
 {
     /// <summary>KurrentDB connection string.</summary>
     public string ConnectionString { get; set; } = "esdb://localhost:2113?tls=false";
 
-    /// <summary>Logical service name used in the discovery stream name.</summary>
+    /// <summary>Logical service name — used in the discovery stream name.</summary>
     public string ServiceName { get; set; } = "default";
 
     /// <summary>How often to write heartbeat events.</summary>
@@ -19,10 +19,10 @@ public sealed class KurrentDbDiscoveryOptions
     /// <summary>How long before a node without heartbeats is considered dead.</summary>
     public TimeSpan HeartbeatTtl { get; set; } = TimeSpan.FromSeconds(10);
 
-    /// <summary>This node's advertised hostname.</summary>
+    /// <summary>This node's advertised hostname. Falls back to <c>Dns.GetHostName()</c> if empty.</summary>
     public string PublicHostname { get; set; } = "";
 
-    /// <summary>This node's advertised port (typically Akka.Remote port).</summary>
+    /// <summary>This node's advertised port (typically the Akka.Remote port).</summary>
     public int PublicPort { get; set; }
 }
 
@@ -70,32 +70,31 @@ public static class AkkaHostingExtensions
         this AkkaConfigurationBuilder builder,
         KurrentDbDiscoveryOptions options)
     {
+        // Build strongly-typed settings and register them in the static registry.
+        // The discovery provider constructor reads from the registry — not from config.
+        var settings = KurrentDbDiscoverySettings.FromOptions(options);
+        var settingsKey = KurrentDbDiscoverySetup.Register(settings);
+
         var fqcn = typeof(KurrentDbServiceDiscovery).AssemblyQualifiedName!
             .Split(',')
             .Take(2)
             .Select(s => s.Trim())
             .Aggregate((a, b) => $"{a}, {b}");
 
-        var hostname = string.IsNullOrEmpty(options.PublicHostname)
-            ? System.Net.Dns.GetHostName()
-            : options.PublicHostname;
-
-        var hocon = $$"""
+        // Minimal internal wiring — only the class reference and the registry key.
+        // All actual configuration flows through the strongly-typed options above.
+        builder.AddHocon(
+            $$"""
             akka.discovery {
                 method = kurrentdb
                 kurrentdb {
                     class = "{{fqcn}}"
-                    connection-string = "{{options.ConnectionString}}"
-                    service-name = "{{options.ServiceName}}"
-                    heartbeat-interval = {{options.HeartbeatInterval.TotalSeconds}}s
-                    heartbeat-ttl = {{options.HeartbeatTtl.TotalSeconds}}s
-                    public-hostname = "{{hostname}}"
-                    public-port = {{options.PublicPort}}
+                    settings-key = "{{settingsKey}}"
                 }
             }
-            """;
+            """,
+            HoconAddMode.Prepend);
 
-        builder.AddHocon(hocon, HoconAddMode.Prepend);
         return builder;
     }
 }
