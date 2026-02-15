@@ -485,6 +485,8 @@ This is essentially how **Akka Cluster** works internally — the spike we alrea
 
 ## Option 8: Work Stealing (Claim & Steal)
 
+> **Constraint violation:** This option uses heartbeat-based claim renewal, which is effectively lease-based ownership. The claim + heartbeat + timeout-to-steal pattern is a lease in all but name. Included for completeness but **conflicts with the "no lease-based ownership" hard constraint**.
+
 **How it works:** No upfront assignment at all. Workers greedily claim partitions from a shared pool. If a worker is overloaded or dies, other workers steal its partitions. Reactive rather than planned.
 
 ```
@@ -554,7 +556,7 @@ This is essentially how **Akka Cluster** works internally — the spike we alrea
 | Criteria | 1. Bully | 2. Raft | 3. KurrentDB Log | 4. Hash Ring | 5. Protocol Actors | 6. Rendezvous (HRW) | 7. Gossip+CRDT | 8. Work Stealing |
 |---|---|---|---|---|---|---|---|---|
 | **Server coordination** | None | None | None | None | None | None | None | None |
-| **Leases** | None | None | None | None | None | None | None | None |
+| **Leases** | None | None | None | None | None | None | None | **Yes (hidden)** |
 | **Strategy flexibility** | Any | Any | Deterministic | Hash only | Any | Hash + weighted | Deterministic | Capacity-biased |
 | **Split-brain safety** | Term fencing | Built-in | N/A (no leader) | N/A | Epoch+majority | N/A | Crumbles safely | N/A (claim-based) |
 | **Geo-latency impact** | Election slow | Heartbeat tuning | Write propagation | Membership prop. | 2 round-trips | Membership prop. | Gossip rounds | Claim race latency |
@@ -589,7 +591,7 @@ This is essentially how **Akka Cluster** works internally — the spike we alrea
 | **P1** | Rendezvous hashing with weighted distribution | Option 6 | Simpler than hash ring, supports weights |
 | **P1** | Propose/vote/commit protocol | Option 5 | Leaderless majority-based assignment |
 | **P1** | Akka Cluster gossip + custom assignment | Option 7 | Leverage Akka's CRDT membership with our assignment logic |
-| **P2** | Work stealing via KurrentDB claims | Option 8 | Reactive assignment, locality-biased |
+| **P2** | Work stealing via KurrentDB claims | Option 8 | Reactive assignment, locality-biased. **Note: violates no-lease constraint** |
 | **P2** | Raft consensus group (actor-based) | Option 2 | Full Raft as actors — likely overkill but educational |
 | **P2** | Split-brain fencing with epochs | Options 1, 5 | Term/epoch fencing prevents stale leaders |
 | **P2** | Geo-latency simulation (artificial delays) | All | How each option behaves at 100-300ms RTT |
@@ -609,7 +611,7 @@ This is essentially how **Akka Cluster** works internally — the spike we alrea
       │         │
       │         ├──► P1: Deterministic assignment function
       │         │
-      │         └──► P2: Work stealing (claim-based variant)
+      │         └──► P2: Work stealing (claim-based variant) ⚠️ lease-like
       │
       ├──► P1: Consistent hash ring
       │         │
@@ -639,7 +641,7 @@ If Option 3 proves viable with deterministic strategies, it may be the winner �
 
 Option 7 (Gossip+CRDT) is interesting because we already have the Akka Cluster spike — we could plug in a custom assignment function on top of Akka's gossip membership without building gossip from scratch.
 
-Option 8 (Work Stealing) is worth a P2 spike for the locality-biased property — it's the only option where geo-proximity naturally influences assignment without explicit configuration.
+Option 8 (Work Stealing) has a unique locality-biased property, but be aware: claim + heartbeat + timeout-to-steal **is lease-based ownership in disguise**, which conflicts with the no-lease hard constraint. Worth knowing about, but goes against a stated design goal.
 
 Option 2 (Raft) is educational but likely overkill — you'd be building a consensus algorithm to solve a problem that simpler approaches handle.
 
