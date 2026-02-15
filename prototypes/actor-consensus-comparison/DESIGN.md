@@ -18,6 +18,33 @@ We need **N workers** (geo-distributed, e.g. Paris / Sydney / Spain) to **self-o
 | **Flexible distribution strategies** | Must support weighted, locality-aware, capacity-based, not just round-robin |
 | **Geo-distributed workers** | High-latency links (100-300ms RTT), partition tolerance matters |
 
+### Key Groups (Virtual Partitions)
+
+KurrentDB does not have native partitions. Instead, the Kurrent Processors project introduces **key groups** — virtual partitions computed by hashing the stream name:
+
+```
+  stream name  ──►  hash(stream_name) mod key_group_count  ──►  key group ID
+```
+
+- **Stream "order-12345"** → `hash("order-12345") mod 128` → key group 47
+- **Stream "order-67890"** → `hash("order-67890") mod 128` → key group 12
+- **All streams in key group 47** are processed by whoever owns key group 47
+
+The key group count is a **fixed architectural parameter** (default: **128**). It determines:
+
+| Property | Impact |
+|---|---|
+| **Maximum parallelism** | 128 key groups = at most 128 workers can be fully utilized |
+| **Rebalance granularity** | More key groups = finer-grained, smoother rebalancing |
+| **Distribution quality** | 128 KGs / 3 workers ≈ 43 each — even distribution with any hash-based strategy |
+| **Hot stream isolation** | Two hot streams in the same key group can't be separated — more key groups reduces collision probability |
+
+> **Why 128?** With 3 workers each gets ~43 key groups (great distribution). Scales comfortably to 10 workers (13 each — still good). Leaves headroom to 20+ workers before the ratio gets tight. No meaningful overhead difference vs. 64.
+
+**Changing the key group count is a breaking change** — every stream rehashes to a different key group, invalidating all existing assignments and checkpoints. Over-provision upfront.
+
+> **Impact on this analysis:** The scenario walkthroughs below use 6 simplified partitions (P0-P5) to keep examples readable. In production with 128 key groups, the hash-based distribution problems flagged for Options 4 and 6 (uneven splits, "new worker gets nothing") are effectively eliminated. Notes are added where relevant.
+
 ---
 
 ## Scenarios
@@ -26,9 +53,11 @@ Every option below is evaluated against the same set of scenarios so they can be
 
 ### Setup
 
+> **Simplified model:** Production uses 128 key groups. These scenarios use 6 partitions (P0-P5) to keep walkthroughs readable. Where the key group count materially changes the outcome, it's called out.
+
 ```
 Workers:     Paris (ID: 1)     Sydney (ID: 2)     Spain (ID: 3)
-Partitions:  P0   P1   P2   P3   P4   P5
+Partitions:  P0   P1   P2   P3   P4   P5    (representing 128 key groups at small scale)
 
 Desired initial assignment (even split):
   Paris:    P0, P1    (2 partitions)
@@ -443,6 +472,8 @@ Using SHA-256 mod 100 as the hash function. Real computed positions:
 ```
 
 > **Bottom line:** Consistent hash ring with raw SHA-256 and no virtual nodes produces wildly uneven distribution at small scale. With 150+ virtual nodes per worker, distribution becomes even — but that's significant added complexity. This is the primary trade-off vs. HRW (Option 6).
+>
+> **With 128 key groups:** The distribution improves significantly even without virtual nodes — 128 points spread across 3 workers gives roughly 40-45 each instead of 1-5-0. However, the cascading failure problem (all of a dead worker's key groups dump onto one clockwise neighbor) persists regardless of key group count. Virtual nodes are still needed for balanced failover.
 
 ### Assignment Flow
 
@@ -615,7 +646,7 @@ Using SHA-256 of `"partition:worker"`, taking the first 8 hex chars as an intege
   Result: Paris: P5 (1) | Sydney: P0,P2,P3 (3) | Spain: P1,P4 (2)
 ```
 
-Note: with only 6 partitions, a perfectly even 2-2-2 split is unlikely with real hashes. The 3-2-1 distribution is typical variance for small partition counts. With 100+ partitions, HRW converges toward even distribution naturally — no virtual nodes needed.
+Note: with only 6 partitions, a perfectly even 2-2-2 split is unlikely with real hashes. The 3-2-1 distribution is typical variance for small partition counts. **With 128 key groups**, HRW converges toward ~43-43-42 naturally — no virtual nodes needed.
 
 **B — Sydney Crashes:**
 
@@ -664,7 +695,9 @@ This is a key advantage over the hash ring: when a worker dies, its partitions s
   Zero partitions moved — Tokyo gets nothing!
 ```
 
-⚠️ **Small-N problem:** With only 6 partitions, there's a real chance a new worker's hash scores don't beat any existing winner. Tokyo's scores are consistently lower. With 100+ partitions, statistical probability ensures every new worker wins at least some. For small partition counts, a **rebalance trigger** is needed on top of HRW — e.g., if any worker has 0 partitions, force-reassign from the most loaded worker.
+⚠️ **Small-N problem (6 partitions only):** With only 6 partitions, there's a real chance a new worker's hash scores don't beat any existing winner. Tokyo's scores are consistently lower.
+
+> **With 128 key groups: this problem disappears.** A 4th worker joining a 3-worker cluster will statistically win ~32 of 128 key groups (128/4). The probability of winning zero out of 128 independent hash competitions is vanishingly small. This is the primary reason the key group count matters — it converts HRW from "unreliable at small N" to "reliably even distribution."
 
 ### Assignment Flow
 
@@ -986,16 +1019,16 @@ The release protocol adds complexity: workers must agree on the target load, dec
 
 How each option handles the 4 shared scenarios:
 
-### A — Cold Start (3 workers, 6 partitions)
+### A — Cold Start (3 workers, 6 partitions / 128 key groups in production)
 
 | Option | How assignment happens | Who decides | Distribution | Time to first assignment |
 |---|---|---|---|---|
 | 1. Bully | Election → leader assigns | Spain (highest ID) | 2-2-2 (leader controls) | Election rounds + 1 write (~2-3s geo) |
 | 2. Raft | Election → leader proposes → majority commits | Spain (Raft leader) | 2-2-2 (leader controls) | Election + 1 commit round (~2-4s geo) |
 | 3. KurrentDB Log | Workers write join events → all compute same result | Nobody (deterministic function) | Depends on function | Join events propagate (~1s) |
-| 4. Hash Ring | Workers join ring → local computation | Nobody (hash function) | **1-5-0** ⚠️ (without vnodes) | Membership propagation (~1s) |
+| 4. Hash Ring | Workers join ring → local computation | Nobody (hash function) | **1-5-0** ⚠️ (6 KGs, no vnodes) / ~43-43-42 (128 KGs) | Membership propagation (~1s) |
 | 5. Protocol Actors | Any worker proposes → majority votes → commit | First proposer | 2-2-2 (proposer controls) | 2 round-trips (~1-2s geo) |
-| 6. Rendezvous (HRW) | Workers agree on member list → local computation | Nobody (hash function) | **1-3-2** (hash variance) | Membership propagation (~1s) |
+| 6. Rendezvous (HRW) | Workers agree on member list → local computation | Nobody (hash function) | **1-3-2** (6 KGs) / ~43-43-42 (128 KGs) | Membership propagation (~1s) |
 | 7. Gossip+CRDT | Gossip converges → local computation | Nobody (deterministic function) | Depends on function | 2-3 gossip rounds (~600ms-1s) |
 | 8. Work Stealing | Workers race to claim partitions | Whoever writes fastest | ~2-2-2 (non-deterministic) | Immediate (progressive) |
 
@@ -1006,7 +1039,7 @@ How each option handles the 4 shared scenarios:
 | 1. Bully | Leader's heartbeat timeout | ~2s | 2 (P2, P3) | Yes | 3-3 (leader controls) |
 | 2. Raft | Raft heartbeat timeout | ~2-5s | 2 (P2, P3) | Yes | 3-3 (leader controls) |
 | 3. KurrentDB Log | Heartbeat events stop → any worker writes WorkerLeft | ~5-10s | 2 (P2, P3) | Depends on function | Depends on function |
-| 4. Hash Ring | Membership update removes Sydney | Depends on mechanism | **5** (all Sydney's → Paris) ⚠️ | Yes | **6-0** ⚠️ (without vnodes) |
+| 4. Hash Ring | Membership update removes Sydney | Depends on mechanism | **5** (all Sydney's → Paris) ⚠️ | Yes | **6-0** ⚠️ (without vnodes). 128 KGs: still cascades to neighbor |
 | 5. Protocol Actors | Heartbeat timeout → proposer triggers rebalance | ~2-3s | 2 (P2, P3) | Yes | 3-3 (proposer controls) |
 | 6. Rendezvous (HRW) | Membership update removes Sydney | Depends on mechanism | 3 (P0, P2, P3) | Yes | **3-3** ✓ (spread across both) |
 | 7. Gossip+CRDT | φ-accrual failure detector | Adaptive (~2-5s) | Depends on function | Depends on function | Depends on function |
@@ -1034,7 +1067,7 @@ How each option handles the 4 shared scenarios:
 | 3. KurrentDB Log | Depends on function | Depends on function | If using HRW: yes |
 | 4. Hash Ring | 2 (P2, P3 → Tokyo) | Sydney loses 2 | Yes — other workers untouched |
 | 5. Protocol Actors | 2 (proposer decides) | Proposer picks | Yes |
-| 6. Rendezvous (HRW) | **0** ⚠️ (Tokyo can't out-hash anyone) | Nobody | Yes — but Tokyo gets nothing! |
+| 6. Rendezvous (HRW) | **0** ⚠️ (6 KGs) / **~32** ✓ (128 KGs) | Nobody (6 KGs) / ~1 from each worker (128 KGs) | 6 KGs: Tokyo gets nothing! / 128 KGs: even ~32 each ✓ |
 | 7. Gossip+CRDT | Depends on function | Depends on function | Depends on function |
 | 8. Work Stealing | 2 (voluntary release by overloaded workers) | Workers holding > floor(6/4) release | Partial — released partitions are non-deterministic |
 
@@ -1055,6 +1088,7 @@ How each option handles the 4 shared scenarios:
 | **Rebalance speed** | Instant (leader) | Majority commit | Event propagation | Instant (local) | 2-phase voting | Instant (local) | Gossip convergence | Steal timeout |
 | **Actor framework fit** | Natural | Natural | DB-centric | Minimal | Very natural | Minimal | Built into Akka | Moderate |
 | **Membership sub-problem** | Election | Raft log | KurrentDB stream | Needs solving | Part of protocol | Needs solving | Gossip (built-in) | KurrentDB heartbeats |
+| **Key group count sensitivity** | None | None | Depends on function | High (vnodes needed at low N) | None | Low (even at 128+) | Depends on function | None |
 
 ---
 
@@ -1415,4 +1449,4 @@ This is relevant if some partitions are much hotter than others — the bounded-
 
 ### Key Takeaway
 
-Consistent hashing is a foundational algorithm worth understanding, but for our partition assignment problem with 3-10 workers, **rendezvous hashing (Option 6) is the practical choice**. It gives the same minimal-disruption guarantee with less code, no tuning, and built-in weight support. Think of consistent hashing as the "industrial-scale" version and rendezvous hashing as the "right-sized" version for our problem.
+Consistent hashing is a foundational algorithm worth understanding, but for our partition assignment problem with 3-10 workers and 128 key groups, **rendezvous hashing (Option 6) is the practical choice**. It gives the same minimal-disruption guarantee with less code, no tuning, and built-in weight support. With 128 key groups, HRW's distribution is naturally even (~43 per worker with 3 workers) without any virtual nodes. Consistent hashing also distributes better at 128 key groups, but it still needs virtual nodes for balanced failover (the cascading-to-one-neighbor problem persists regardless of key group count). Think of consistent hashing as the "industrial-scale" version and rendezvous hashing as the "right-sized" version for our problem.
