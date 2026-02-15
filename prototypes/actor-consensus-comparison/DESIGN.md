@@ -382,59 +382,67 @@ Key: Raft quorum is 2 of 3 — system continues with 2 alive. If Paris ALSO died
 
 ### Scenario Walkthrough
 
-Using a simplified ring (0-99). Workers and partitions are hashed:
+Using SHA-256 mod 100 as the hash function. Real computed positions:
 
 ```
-  hash("paris")=15   hash("sydney")=48   hash("spain")=79
-  hash("P0")=5  hash("P1")=22  hash("P2")=37  hash("P3")=55  hash("P4")=68  hash("P5")=90
+  SHA-256 mod 100:
+  hash("paris")  = 99    hash("sydney") = 66    hash("spain") = 4
+
+  hash("P0") = 94    hash("P1") = 66    hash("P2") = 34
+  hash("P3") = 47    hash("P4") = 54    hash("P5") = 49
 ```
 
 **A — Cold Start:**
 
 ```
-  Workers join the ring at their hash positions. Rule: walk clockwise, first worker owns it.
+  Workers on ring: Spain(4) ──── Sydney(66) ──── Paris(99)
+  Rule: walk clockwise, first worker you hit owns it.
 
-  P0(5)  → Paris(15) ✓     P1(22) → Sydney(48) ✓     P2(37) → Sydney(48) ✓
-  P3(55) → Spain(79) ✓     P4(68) → Spain(79) ✓      P5(90) → Paris(15) ✓ (wraps)
+  P2(34) → Sydney(66) ✓     P3(47) → Sydney(66) ✓     P5(49) → Sydney(66) ✓
+  P4(54) → Sydney(66) ✓     P1(66) → Sydney(66) ✓     P0(94) → Paris(99) ✓
 
-  Result: Paris: P0,P5 | Sydney: P1,P2 | Spain: P3,P4
+  Result: Paris: P0 (1) | Sydney: P1,P2,P3,P4,P5 (5) | Spain: — (0)
 ```
 
-Note: the hash ring assigns by position, not by our desired split. Paris gets P0+P5 (not P0+P1). This is the trade-off — the hash function decides, not you.
+⚠️ **This is terrible distribution.** The 3 workers cluster at positions 4, 66, 99 — Spain→Sydney covers a 62-unit arc (most of the ring), but Sydney→Paris is only 33 units and Paris→Spain (wrapping) is only 5 units. This is exactly why **virtual nodes** are essential — with only 3 points on the ring, hash clustering creates highly uneven arcs. (See [Appendix A](#appendix-a-consistent-hashing-deep-dive) for virtual node details.)
 
 **B — Sydney Crashes:**
 
 ```
-  Remove Sydney(48) from ring. Re-walk clockwise:
+  Remove Sydney(66) from ring. Workers: Spain(4), Paris(99).
+  Re-walk clockwise — ALL partitions land between 4 and 99:
 
-  P1(22) → Spain(79) ← was Sydney     P2(37) → Spain(79) ← was Sydney
-  Everything else unchanged.
+  P2(34) → Paris(99)     P3(47) → Paris(99)     P5(49) → Paris(99)
+  P4(54) → Paris(99)     P1(66) → Paris(99)     P0(94) → Paris(99)
 
-  Result: Paris: P0,P5 (unchanged ✓) | Spain: P1,P2,P3,P4 (got Sydney's)
+  Result: Paris: P0,P1,P2,P3,P4,P5 (6!) | Spain: — (0!)
 
-  Problem: Spain gets 4 partitions, Paris gets 2. Uneven!
-  All of Sydney's load went to the next clockwise neighbor.
+  Even worse — Paris absorbs ALL 6 partitions.
+  Spain's arc (99→4, wrapping) is only 5 units wide.
 ```
 
 **C — Sydney Returns:**
 
 ```
-  Re-add Sydney(48). P1 and P2 go back to Sydney.
-
-  Result: Paris: P0,P5 | Sydney: P1,P2 | Spain: P3,P4
-  Perfectly sticky ✓ — same hash, same position, same assignment.
+  Re-add Sydney(66). Same hash = same position = same assignment.
+  Result: Paris: P0 | Sydney: P1,P2,P3,P4,P5 | Spain: —
+  Perfectly sticky ✓ — but still terribly uneven.
 ```
 
 **D — Tokyo Joins:**
 
 ```
-  hash("tokyo")=60. Inserted on ring between P3(55) and P4(68).
+  hash("tokyo") = 48. Inserted on ring: Spain(4) ── Tokyo(48) ── Sydney(66) ── Paris(99).
 
-  P3(55) → Tokyo(60) ← was Spain     Everything else unchanged.
+  P2(34) → Tokyo(48) ← was Sydney     P3(47) → Tokyo(48) ← was Sydney
+  P5(49) → Sydney(66)                  P4(54) → Sydney(66)
+  P1(66) → Sydney(66)                  P0(94) → Paris(99)
 
-  Result: Paris: P0,P5 | Sydney: P1,P2 | Spain: P4 | Tokyo: P3
-  Only 1 partition moved! Minimal disruption ✓
+  Result: Paris: P0 (1) | Sydney: P1,P4,P5 (3) | Tokyo: P2,P3 (2) | Spain: — (0)
+  Tokyo absorbs some of Sydney's overload, but Spain still gets nothing.
 ```
+
+> **Bottom line:** Consistent hash ring with raw SHA-256 and no virtual nodes produces wildly uneven distribution at small scale. With 150+ virtual nodes per worker, distribution becomes even — but that's significant added complexity. This is the primary trade-off vs. HRW (Option 6).
 
 ### Assignment Flow
 
@@ -586,66 +594,77 @@ Note: the hash ring assigns by position, not by our desired split. Paris gets P0
 
 **A — Cold Start:**
 
+Using SHA-256 of `"partition:worker"`, taking the first 8 hex chars as an integer score. Highest score wins.
+
 ```
   Workers agree on member list: [paris, sydney, spain]
-  For each partition, compute hash(partition, worker) for all workers.
-  Highest hash wins:
 
-  P0: hash(P0,paris)=82  hash(P0,sydney)=41  hash(P0,spain)=67   → Paris ✓
-  P1: hash(P1,paris)=23  hash(P1,sydney)=71  hash(P1,spain)=55   → Sydney ✓
-  P2: hash(P2,paris)=64  hash(P2,sydney)=38  hash(P2,spain)=91   → Spain ✓
-  P3: hash(P3,paris)=17  hash(P3,sydney)=88  hash(P3,spain)=44   → Sydney ✓
-  P4: hash(P4,paris)=53  hash(P4,sydney)=29  hash(P4,spain)=76   → Spain ✓
-  P5: hash(P5,paris)=95  hash(P5,sydney)=60  hash(P5,spain)=12   → Paris ✓
+  P0: SHA256("P0:paris")=0xb0f2ca01  SHA256("P0:sydney")=0xde678c0a  SHA256("P0:spain")=0x9a700307
+      → Sydney (0xde678c0a highest) ✓
+  P1: SHA256("P1:paris")=0x64eea4d0  SHA256("P1:sydney")=0x8ee49e90  SHA256("P1:spain")=0xf1002873
+      → Spain (0xf1002873 highest) ✓
+  P2: SHA256("P2:paris")=0x222b70fa  SHA256("P2:sydney")=0xb1b8c658  SHA256("P2:spain")=0x47cfca6d
+      → Sydney (0xb1b8c658 highest) ✓
+  P3: SHA256("P3:paris")=0xd86ce171  SHA256("P3:sydney")=0xe04e7d4a  SHA256("P3:spain")=0x3f1003d6
+      → Sydney (0xe04e7d4a highest) ✓
+  P4: SHA256("P4:paris")=0xb973cb6e  SHA256("P4:sydney")=0x745017c2  SHA256("P4:spain")=0xee7cbe82
+      → Spain (0xee7cbe82 highest) ✓
+  P5: SHA256("P5:paris")=0xc187e9ca  SHA256("P5:sydney")=0x0155b20c  SHA256("P5:spain")=0xbd93b3bc
+      → Paris (0xc187e9ca highest) ✓
 
-  Result: Paris: P0,P5 | Sydney: P1,P3 | Spain: P2,P4
-  Even 2-2-2 split ✓ (hash functions distribute evenly without tuning)
+  Result: Paris: P5 (1) | Sydney: P0,P2,P3 (3) | Spain: P1,P4 (2)
 ```
 
-Note: like the hash ring, the hash function decides the assignment, not you. But the distribution is naturally even without virtual nodes.
+Note: with only 6 partitions, a perfectly even 2-2-2 split is unlikely with real hashes. The 3-2-1 distribution is typical variance for small partition counts. With 100+ partitions, HRW converges toward even distribution naturally — no virtual nodes needed.
 
 **B — Sydney Crashes:**
 
 ```
   Remove Sydney from member list. Recompute only Sydney's partitions:
 
-  P1: was Sydney. Remaining: hash(P1,paris)=23  hash(P1,spain)=55 → Spain ✓
-  P3: was Sydney. Remaining: hash(P3,paris)=17  hash(P3,spain)=44 → Spain ✓
+  P0: was Sydney. Remaining: paris=0xb0f2ca01  spain=0x9a700307 → Paris ✓
+  P2: was Sydney. Remaining: paris=0x222b70fa  spain=0x47cfca6d → Spain ✓
+  P3: was Sydney. Remaining: paris=0xd86ce171  spain=0x3f1003d6 → Paris ✓
 
-  Result: Paris: P0,P5 (unchanged ✓) | Spain: P1,P2,P3,P4 (got Sydney's)
+  Result: Paris: P0,P3,P5 (3) | Spain: P1,P2,P4 (3)
 
-  Only P1, P3 moved. P0, P2, P4, P5 untouched (sticky ✓).
-  Same unevenness as hash ring — Sydney's partitions go to whoever
-  had the next-highest hash, which could be the same worker.
+  Only P0, P2, P3 moved. P1, P4, P5 untouched (sticky ✓).
+  Perfect 3-3 split! Sydney's partitions distributed to BOTH survivors
+  based on their individual next-highest scores — not all to one neighbor.
 ```
+
+This is a key advantage over the hash ring: when a worker dies, its partitions spread across the remaining workers based on independent hash scores, rather than all piling onto one clockwise neighbor.
 
 **C — Sydney Returns:**
 
 ```
   Add Sydney back to member list. Recompute:
 
-  P1: hash(P1,sydney)=71 is still highest → Sydney ✓
-  P3: hash(P3,sydney)=88 is still highest → Sydney ✓
+  P0: sydney=0xde678c0a is still highest → Sydney ✓
+  P2: sydney=0xb1b8c658 is still highest → Sydney ✓
+  P3: sydney=0xe04e7d4a is still highest → Sydney ✓
 
-  Result: Paris: P0,P5 | Sydney: P1,P3 | Spain: P2,P4
+  Result: Paris: P5 (1) | Sydney: P0,P2,P3 (3) | Spain: P1,P4 (2)
   Perfectly sticky ✓ — same members = same hashes = same assignment.
 ```
 
 **D — Tokyo Joins:**
 
 ```
-  Add Tokyo. Recompute all:
+  Add Tokyo. Recompute all — does Tokyo's score beat the current winner?
 
-  P0: hash(P0,tokyo)=36 — Paris(82) still highest → Paris ✓ (unchanged)
-  P1: hash(P1,tokyo)=84 — higher than Sydney(71)! → Tokyo ✓ (moved from Sydney)
-  P2: hash(P2,tokyo)=19 — Spain(91) still highest → Spain ✓ (unchanged)
-  P3: hash(P3,tokyo)=52 — Sydney(88) still highest → Sydney ✓ (unchanged)
-  P4: hash(P4,tokyo)=80 — higher than Spain(76)! → Tokyo ✓ (moved from Spain)
-  P5: hash(P5,tokyo)=33 — Paris(95) still highest → Paris ✓ (unchanged)
+  P0: tokyo=0x33dafb33 vs sydney=0xde678c0a → Sydney still wins ✓ (unchanged)
+  P1: tokyo=0xc419ce76 vs spain=0xf1002873  → Spain still wins ✓ (unchanged)
+  P2: tokyo=0x1c50acf0 vs sydney=0xb1b8c658 → Sydney still wins ✓ (unchanged)
+  P3: tokyo=0x176c5374 vs sydney=0xe04e7d4a → Sydney still wins ✓ (unchanged)
+  P4: tokyo=0x151e3aed vs spain=0xee7cbe82  → Spain still wins ✓ (unchanged)
+  P5: tokyo=0x0d0292d5 vs paris=0xc187e9ca  → Paris still wins ✓ (unchanged)
 
-  Result: Paris: P0,P5 | Sydney: P3 | Spain: P2 | Tokyo: P1,P4
-  Only 2 partitions moved (P1, P4). 4 stayed (sticky ✓).
+  Result: Paris: P5 (1) | Sydney: P0,P2,P3 (3) | Spain: P1,P4 (2) | Tokyo: — (0!)
+  Zero partitions moved — Tokyo gets nothing!
 ```
+
+⚠️ **Small-N problem:** With only 6 partitions, there's a real chance a new worker's hash scores don't beat any existing winner. Tokyo's scores are consistently lower. With 100+ partitions, statistical probability ensures every new worker wins at least some. For small partition counts, a **rebalance trigger** is needed on top of HRW — e.g., if any worker has 0 partitions, force-reassign from the most loaded worker.
 
 ### Assignment Flow
 
@@ -857,22 +876,64 @@ Note: φ-accrual adapts per peer — Paris→Sydney at 300ms RTT gets a longer l
 **C — Sydney Returns:**
 
 ```
-  Pool has no free partitions. Sydney must wait for rebalance.
-  No automatic rebalance — nobody "gives back" partitions.
-  Sydney sits idle unless another mechanism triggers redistribution.
+  Pool has no free partitions. Sydney announces itself:
+    Sydney writes: WorkerJoined(worker=sydney)  ──► v20
 
-  NOT sticky — Sydney doesn't get P1, P4 back automatically.
-  Would need a separate "rebalance" protocol on top.
+  Rebalance trigger: all workers subscribe to the coordination stream.
+  Paris and Spain see the new worker and check load balance:
+    target = ceil(6 / 3) = 2 partitions per worker
+    Paris  has 3 (P0,P1,P3) — over target by 1
+    Spain  has 3 (P2,P4,P5) — over target by 1
+
+  Voluntary release protocol:
+    Each overloaded worker independently picks its LAST-claimed partition to release:
+    Paris  writes: ReleasePartition(P1, worker=paris)   ──► v21
+    Spain  writes: ReleasePartition(P4, worker=spain)   ──► v22
+
+  Sydney sees free partitions and claims them:
+    Sydney writes: ClaimPartition(P1, worker=sydney)    ──► v23 ✓
+    Sydney writes: ClaimPartition(P4, worker=sydney)    ──► v24 ✓
+
+  Result: Paris: P0,P3 | Sydney: P1,P4 | Spain: P2,P5
+  Balanced ✓ — but NOT sticky (Sydney gets P1,P4 not its original partitions).
+  Which partitions Sydney gets depends on release timing, not on history.
 ```
+
+The release protocol adds complexity: workers must agree on the target load, decide which partitions to release, and coordinate the release/claim sequence. This is effectively a mini-rebalancing protocol layered on top of work stealing.
 
 **D — Tokyo Joins:**
 
 ```
-  Same problem as C — no free partitions, Tokyo sits idle.
-  Someone must voluntarily release partitions, or a periodic
-  rebalance must redistribute. Work stealing only handles the
-  initial grab and failure recovery, not scale-out.
+  Tokyo writes: WorkerJoined(worker=tokyo)  ──► v30
+
+  Rebalance trigger: all workers check load balance:
+    target = ceil(6 / 4) = 2 partitions per worker (but 6/4 = 1.5, so some get 2, some get 1)
+    max_per_worker = ceil(6 / 4) = 2
+    Paris  has 2 (P0,P3) — at target, no release
+    Sydney has 2 (P1,P4) — at target, no release
+    Spain  has 2 (P2,P5) — at target, no release
+    Tokyo  has 0 — under target
+
+  Problem: nobody is OVER target, so nobody releases voluntarily!
+  Need a tie-breaking rule: "if a worker with 0 partitions exists AND
+  you hold max_per_worker, release your last-claimed partition."
+
+  Revised: target when idle workers exist = floor(6 / 4) = 1 for some workers.
+    Workers holding > floor(6/4) partitions release one:
+    Paris  writes: ReleasePartition(P3, worker=paris)   ──► v31
+    Sydney writes: ReleasePartition(P4, worker=sydney)  ──► v32
+
+  Tokyo claims:
+    Tokyo writes: ClaimPartition(P3, worker=tokyo)      ──► v33 ✓
+    Tokyo writes: ClaimPartition(P4, worker=tokyo)      ──► v34 ✓
+
+  Result: Paris: P0 (1) | Sydney: P1 (1) | Spain: P2,P5 (2) | Tokyo: P3,P4 (2)
+  Balanced ✓ (some have 1, some have 2 — correct for 6/4).
+  But: release decisions are non-deterministic — different workers could release
+  different partitions depending on timing, creating flapping risk.
 ```
+
+> **Scale-out complexity:** The voluntary release protocol requires (1) all workers agree on who is overloaded (consensus on member list + partition counts), (2) overloaded workers decide which partitions to shed (deterministic pick avoids flapping), (3) released partitions are claimed atomically (avoid thundering herd). This layered protocol significantly increases complexity and starts resembling a leader-based assignment system — undermining the "no coordination" benefit of work stealing.
 
 ### Assignment Flow
 
@@ -882,6 +943,8 @@ Note: φ-accrual adapts per peer — Paris→Sydney at 300ms RTT gets a longer l
 4. Workers heartbeat their claims periodically
 5. If a worker stops heartbeating, its partitions become stealable after a timeout
 6. Idle or less-loaded workers steal orphaned partitions
+7. **Scale-out:** When a new worker joins, overloaded workers voluntarily release partitions (target = `ceil(partitions / workers)`). New worker claims released partitions. Requires a `WorkerJoined` event and coordinated release/claim sequence
+8. **Release tie-breaking:** Workers release their most-recently-claimed partition first (LIFO), reducing disruption to long-running processing
 
 ### Strengths
 
@@ -899,6 +962,7 @@ Note: φ-accrual adapts per peer — Paris→Sydney at 300ms RTT gets a longer l
 - **Heartbeat overhead** — every worker heartbeats every claimed partition
 - **Steal protocol complexity** — "is this partition really orphaned or just slow?" requires careful timeout tuning
 - **Uneven initial distribution** — without coordination, fast-starting workers hoard partitions
+- **Scale-out requires layered protocol** — voluntary release on worker join needs consensus on member list + load counts + deterministic partition selection. This layered coordination undermines the "no upfront coordination" benefit
 
 ### Geo Considerations
 
@@ -913,8 +977,8 @@ Note: φ-accrual adapts per peer — Paris→Sydney at 300ms RTT gets a longer l
 |---|---|
 | **Claim race via optimistic concurrency** | Workers can claim without coordination |
 | **Steal protocol with heartbeat timeout** | Orphaned partitions are reclaimed correctly |
+| **Voluntary release on scale-out** | Overloaded workers shed partitions when new worker joins |
 | **Contention under simultaneous startup** | 3 workers starting at once don't thrash |
-| **Locality-biased claiming** | Workers naturally prefer nearby partitions |
 
 ---
 
@@ -924,29 +988,29 @@ How each option handles the 4 shared scenarios:
 
 ### A — Cold Start (3 workers, 6 partitions)
 
-| Option | How assignment happens | Who decides | Time to first assignment |
-|---|---|---|---|
-| 1. Bully | Election → leader assigns | Spain (highest ID) | Election rounds + 1 write (~2-3s geo) |
-| 2. Raft | Election → leader proposes → majority commits | Spain (Raft leader) | Election + 1 commit round (~2-4s geo) |
-| 3. KurrentDB Log | Workers write join events → all compute same result | Nobody (deterministic function) | Join events propagate (~1s) |
-| 4. Hash Ring | Workers join ring → local computation | Nobody (hash function) | Membership propagation (~1s) |
-| 5. Protocol Actors | Any worker proposes → majority votes → commit | First proposer | 2 round-trips (~1-2s geo) |
-| 6. Rendezvous (HRW) | Workers agree on member list → local computation | Nobody (hash function) | Membership propagation (~1s) |
-| 7. Gossip+CRDT | Gossip converges → local computation | Nobody (deterministic function) | 2-3 gossip rounds (~600ms-1s) |
-| 8. Work Stealing | Workers race to claim partitions | Whoever writes fastest | Immediate (progressive) |
+| Option | How assignment happens | Who decides | Distribution | Time to first assignment |
+|---|---|---|---|---|
+| 1. Bully | Election → leader assigns | Spain (highest ID) | 2-2-2 (leader controls) | Election rounds + 1 write (~2-3s geo) |
+| 2. Raft | Election → leader proposes → majority commits | Spain (Raft leader) | 2-2-2 (leader controls) | Election + 1 commit round (~2-4s geo) |
+| 3. KurrentDB Log | Workers write join events → all compute same result | Nobody (deterministic function) | Depends on function | Join events propagate (~1s) |
+| 4. Hash Ring | Workers join ring → local computation | Nobody (hash function) | **1-5-0** ⚠️ (without vnodes) | Membership propagation (~1s) |
+| 5. Protocol Actors | Any worker proposes → majority votes → commit | First proposer | 2-2-2 (proposer controls) | 2 round-trips (~1-2s geo) |
+| 6. Rendezvous (HRW) | Workers agree on member list → local computation | Nobody (hash function) | **1-3-2** (hash variance) | Membership propagation (~1s) |
+| 7. Gossip+CRDT | Gossip converges → local computation | Nobody (deterministic function) | Depends on function | 2-3 gossip rounds (~600ms-1s) |
+| 8. Work Stealing | Workers race to claim partitions | Whoever writes fastest | ~2-2-2 (non-deterministic) | Immediate (progressive) |
 
 ### B — Sydney Crashes
 
-| Option | Detection method | Detection time | Partitions moved | Sticky? | Balanced? |
+| Option | Detection method | Detection time | Partitions moved | Sticky? | Balanced after? |
 |---|---|---|---|---|---|
-| 1. Bully | Leader's heartbeat timeout | ~2s | 2 (P2, P3) | Yes | Leader controls (can balance) |
-| 2. Raft | Raft heartbeat timeout | ~2-5s | 2 (P2, P3) | Yes | Leader controls (can balance) |
+| 1. Bully | Leader's heartbeat timeout | ~2s | 2 (P2, P3) | Yes | 3-3 (leader controls) |
+| 2. Raft | Raft heartbeat timeout | ~2-5s | 2 (P2, P3) | Yes | 3-3 (leader controls) |
 | 3. KurrentDB Log | Heartbeat events stop → any worker writes WorkerLeft | ~5-10s | 2 (P2, P3) | Depends on function | Depends on function |
-| 4. Hash Ring | Membership update removes Sydney from ring | Depends on membership mechanism | 2 (P1, P2) | Yes | No — all go to neighbor |
-| 5. Protocol Actors | Heartbeat timeout → proposer triggers rebalance | ~2-3s | 2 (P2, P3) | Yes | Proposer controls (can balance) |
-| 6. Rendezvous (HRW) | Membership update removes Sydney | Depends on membership mechanism | 2 (P1, P3) | Yes | No — next-highest gets them |
-| 7. Gossip+CRDT | φ-accrual failure detector | Adaptive (~2-5s) | 2 (P2, P3) | Depends on function | Depends on function |
-| 8. Work Stealing | Heartbeat timeout on claims | ~5s | 2 (P1, P4) | Yes | No — fastest stealer wins |
+| 4. Hash Ring | Membership update removes Sydney | Depends on mechanism | **5** (all Sydney's → Paris) ⚠️ | Yes | **6-0** ⚠️ (without vnodes) |
+| 5. Protocol Actors | Heartbeat timeout → proposer triggers rebalance | ~2-3s | 2 (P2, P3) | Yes | 3-3 (proposer controls) |
+| 6. Rendezvous (HRW) | Membership update removes Sydney | Depends on mechanism | 3 (P0, P2, P3) | Yes | **3-3** ✓ (spread across both) |
+| 7. Gossip+CRDT | φ-accrual failure detector | Adaptive (~2-5s) | Depends on function | Depends on function | Depends on function |
+| 8. Work Stealing | Heartbeat timeout on claims | ~5s | 2 (P1, P4) | Yes | ~3-3 (fastest stealer wins) |
 
 ### C — Sydney Returns
 
@@ -959,7 +1023,7 @@ How each option handles the 4 shared scenarios:
 | 5. Protocol Actors | Detected → proposer reassigns | Yes (proposer can optimize) | Minimal |
 | 6. Rendezvous (HRW) | Re-added to member list, recompute | Yes — same hashes = same result | Zero — only Sydney's partitions return |
 | 7. Gossip+CRDT | Gossips {sydney: Up} → all recompute | If function is stable, yes | Minimal |
-| 8. Work Stealing | No free partitions — Sydney sits idle | No — must wait for rebalance | None (but Sydney has no work!) |
+| 8. Work Stealing | Writes WorkerJoined → overloaded workers release | No — gets whatever is released (LIFO) | 2 workers release 1 partition each |
 
 ### D — Tokyo Joins (4th worker)
 
@@ -968,11 +1032,11 @@ How each option handles the 4 shared scenarios:
 | 1. Bully | 2 (leader decides) | Leader picks who gives up | Yes — leader minimizes movement |
 | 2. Raft | 2 (leader proposes) | Leader picks | Yes |
 | 3. KurrentDB Log | Depends on function | Depends on function | If using HRW: yes |
-| 4. Hash Ring | 1 (P3 only in our example) | Only the neighbor | Yes — other workers untouched |
+| 4. Hash Ring | 2 (P2, P3 → Tokyo) | Sydney loses 2 | Yes — other workers untouched |
 | 5. Protocol Actors | 2 (proposer decides) | Proposer picks | Yes |
-| 6. Rendezvous (HRW) | 2 (P1, P4 in our example) | Whoever Tokyo out-hashes | Yes — non-affected stay |
+| 6. Rendezvous (HRW) | **0** ⚠️ (Tokyo can't out-hash anyone) | Nobody | Yes — but Tokyo gets nothing! |
 | 7. Gossip+CRDT | Depends on function | Depends on function | Depends on function |
-| 8. Work Stealing | 0 — Tokyo sits idle | Nobody | N/A — Tokyo has no work |
+| 8. Work Stealing | 2 (voluntary release by overloaded workers) | Workers holding > floor(6/4) release | Partial — released partitions are non-deterministic |
 
 ---
 
@@ -985,7 +1049,7 @@ How each option handles the 4 shared scenarios:
 | **Strategy flexibility** | Any | Any | Deterministic | Hash only | Any | Hash + weighted | Deterministic | Capacity-biased |
 | **Split-brain safety** | Term fencing | Built-in | N/A (no leader) | N/A | Epoch+majority | N/A | Crumbles safely | N/A (claim-based) |
 | **Geo-latency impact** | Election slow | Heartbeat tuning | Write propagation | Membership prop. | 2 round-trips | Membership prop. | Gossip rounds | Claim race latency |
-| **Complexity** | Medium | High | Low-Medium | Low | Medium | Low | Medium-High | Medium |
+| **Complexity** | Medium | High | Low-Medium | Low | Medium | Low | Medium-High | Medium-High |
 | **Single point of failure** | Leader (temp) | Leader (temp) | KurrentDB | None | None | None | None | KurrentDB |
 | **Implementation effort** | Low | High | Medium | Low | Low | Low | High (or use Akka) | Medium |
 | **Rebalance speed** | Instant (leader) | Majority commit | Event propagation | Instant (local) | 2-phase voting | Instant (local) | Gossip convergence | Steal timeout |
@@ -1085,202 +1149,172 @@ Consistent hashing guarantees that when a server is added or removed, only **K/N
 
 ### How the Ring Works — 3 Workers, 6 Partitions
 
-The ring is a circle of numbers from 0 to 99 (in reality 0 to 2^32-1, but let's use 0-99 to keep it simple). Everything — workers AND partitions — gets hashed onto this circle.
+The ring is a circle of numbers from 0 to 99 (in reality 0 to 2^32-1, but let's use SHA-256 mod 100 to keep it readable). Everything — workers AND partitions — gets hashed onto this circle.
 
 **Step 1 — Hash the workers onto the ring:**
 
 ```
-  hash("paris")    = 15
-  hash("sydney")   = 48
-  hash("spain") = 79
+  SHA-256 mod 100:
+  hash("paris")    = 99       (SHA-256: 1670f2e4...)
+  hash("sydney")   = 66       (SHA-256: e8032604...)
+  hash("spain")    = 4        (SHA-256: 4c799454...)
 ```
 
 Place them on the circle:
 
 ```
                        0
-                       │
-                  15 Paris
-                /           \
-              /               \
-    79 Spain            48 Sydney
-              \               /
-                \           /
-                  ─────────
+                  4 Spain ──── 99 Paris
+                /                      |
+              /                        |
+             /                         |
+              \                        |
+                \                    /
+                  66 Sydney ────
                       50
 ```
+
+Notice the problem already: Spain(4) and Paris(99) are only 5 units apart (wrapping). Sydney(66) sits alone covering a huge arc. This clustering is typical with only 3 hash points.
 
 **Step 2 — Hash the partitions onto the ring:**
 
 ```
-  hash("P0") = 5
-  hash("P1") = 22
-  hash("P2") = 37
-  hash("P3") = 55
-  hash("P4") = 68
-  hash("P5") = 90
-```
-
-Now place everything on the same circle:
-
-```
-                         0
-                    P0(5)│
-                  15 Paris
-                /  P1(22)    \
-              /    P2(37)      \
-    79 Spain            48 Sydney
-        P5(90)\    P3(55)      /
-               \   P4(68)    /
-                  ─────────
-                      50
+  SHA-256 mod 100:
+  hash("P0") = 94    hash("P1") = 66    hash("P2") = 34
+  hash("P3") = 47    hash("P4") = 54    hash("P5") = 49
 ```
 
 **Step 3 — The assignment rule: walk clockwise, first worker you hit owns it.**
 
-Starting from each partition's position, walk clockwise around the ring. The first worker you bump into owns that partition:
+Starting from each partition's position, walk clockwise around the ring:
 
 ```
-  P0 at 5  ──clockwise──► Paris at 15     ✓ Paris owns P0
-  P1 at 22 ──clockwise──► Sydney at 48    ✓ Sydney owns P1
-  P2 at 37 ──clockwise──► Sydney at 48    ✓ Sydney owns P2
-  P3 at 55 ──clockwise──► Spain at 79  ✓ Spain owns P3
-  P4 at 68 ──clockwise──► Spain at 79  ✓ Spain owns P4
-  P5 at 90 ──clockwise──► (wrap!) Paris at 15  ✓ Paris owns P5
+  P2 at 34 ──clockwise──► Sydney at 66    ✓ Sydney owns P2
+  P3 at 47 ──clockwise──► Sydney at 66    ✓ Sydney owns P3
+  P5 at 49 ──clockwise──► Sydney at 66    ✓ Sydney owns P5
+  P4 at 54 ──clockwise──► Sydney at 66    ✓ Sydney owns P4
+  P1 at 66 ──clockwise──► Sydney at 66    ✓ Sydney owns P1 (exact match)
+  P0 at 94 ──clockwise──► Paris at 99     ✓ Paris owns P0
 ```
-
-Note P5: at position 90, walking clockwise goes 91, 92, ... 99, 0, 1, ... 15 — wraps around to Paris.
 
 **Final assignment:**
 
 ```
-  Paris:    P0, P5      (2 partitions)
-  Sydney:   P1, P2      (2 partitions)
-  Spain: P3, P4      (2 partitions)
+  Paris:    P0          (1 partition)
+  Sydney:   P1,P2,P3,P4,P5  (5 partitions!)
+  Spain:    —           (0 partitions!)
 ```
 
-Perfectly even here. In practice with real hash functions, it won't always be this clean — that's what virtual nodes fix (more on that below).
+⚠️ **This is terrible distribution** — and it's what real SHA-256 hashes actually produce with only 3 ring points. Sydney's arc (4→66, spanning 62 units) covers most of the ring. Spain's arc (99→4, spanning only 5 units wrapping around 0) is tiny. This is NOT bad luck — it's the fundamental problem that virtual nodes solve (see below).
 
 **Step 4 — Sydney crashes. What happens?**
 
-Remove Sydney (position 48) from the ring. Now P1 and P2 need new owners. Walk clockwise from their positions again:
+Remove Sydney (position 66) from the ring. Now all of Sydney's 5 partitions need new owners:
 
 ```
-  P0 at 5  ──clockwise──► Paris at 15      (unchanged)
-  P1 at 22 ──clockwise──► Spain at 79   ← was Sydney, now Spain
-  P2 at 37 ──clockwise──► Spain at 79   ← was Sydney, now Spain
-  P3 at 55 ──clockwise──► Spain at 79   (unchanged)
-  P4 at 68 ──clockwise──► Spain at 79   (unchanged)
-  P5 at 90 ──clockwise──► Paris at 15      (unchanged)
+  P0 at 94 ──clockwise──► Paris at 99      (unchanged)
+  P2 at 34 ──clockwise──► Paris at 99      ← was Sydney, now Paris
+  P3 at 47 ──clockwise──► Paris at 99      ← was Sydney, now Paris
+  P5 at 49 ──clockwise──► Paris at 99      ← was Sydney, now Paris
+  P4 at 54 ──clockwise──► Paris at 99      ← was Sydney, now Paris
+  P1 at 66 ──clockwise──► Paris at 99      ← was Sydney, now Paris
 ```
 
 ```
   Before:                          After Sydney dies:
   ─────────                        ─────────────────
-  Paris:    P0, P5  (2)            Paris:    P0, P5          (unchanged ✓)
-  Sydney:   P1, P2  (2)  ──►      Spain: P1, P2, P3, P4  (got Sydney's)
-  Spain: P3, P4  (2)
+  Paris:    P0          (1)        Paris:    P0,P1,P2,P3,P4,P5  (6!)
+  Sydney:   P1-P5       (5) ──►   Spain:    —                   (0!)
+  Spain:    —           (0)
 
-  Moved: P1, P2 (only Sydney's partitions)
-  Stayed: P0, P3, P4, P5 (everyone else's partitions — untouched)
+  Paris absorbs ALL 6 partitions. Spain's tiny arc captures nothing.
 ```
 
-This is the key property: **only the dead worker's partitions move.** Paris doesn't care that Sydney died — its partitions are unaffected.
-
-But notice the problem: Spain now has 4 partitions, Paris has 2. The load is uneven. With a real hash ring this gets worse — the next clockwise neighbor always absorbs ALL of the dead worker's load instead of spreading it.
+This demonstrates the cascading failure problem: **without virtual nodes, all of a dead worker's load dumps onto a single clockwise neighbor**, rather than spreading across survivors.
 
 **Step 5 — Sydney comes back. What happens?**
 
-Re-add Sydney at position 48:
+Re-add Sydney at position 66:
 
 ```
-  P1 at 22 ──clockwise──► Sydney at 48    ← back to Sydney
-  P2 at 37 ──clockwise──► Sydney at 48    ← back to Sydney
+  P2 at 34 ──clockwise──► Sydney at 66    ← back to Sydney
+  P3 at 47 ──clockwise──► Sydney at 66    ← back to Sydney
+  (... all 5 partitions return to Sydney)
 ```
 
-Everything returns to exactly what it was. **Same hash, same position, same assignment.** This is the stickiness property — the assignment is a pure function of the ring state.
+**Same hash, same position, same assignment.** This is the stickiness property — the assignment is a pure function of the ring state.
 
-**Step 6 — New worker Tokyo joins at position 60.**
-
-```
-  hash("tokyo") = 60
-```
-
-Walk clockwise from every partition again:
+**Step 6 — New worker Tokyo joins.**
 
 ```
-  P0 at 5  ──clockwise──► Paris at 15      (unchanged)
-  P1 at 22 ──clockwise──► Sydney at 48     (unchanged)
-  P2 at 37 ──clockwise──► Sydney at 48     (unchanged)
-  P3 at 55 ──clockwise──► Tokyo at 60      ← was Spain, now Tokyo
-  P4 at 68 ──clockwise──► Spain at 79   (unchanged)
-  P5 at 90 ──clockwise──► Paris at 15      (unchanged)
+  SHA-256 mod 100:
+  hash("tokyo") = 48       (SHA-256: afe04579...)
+```
+
+Ring: Spain(4) ── Tokyo(48) ── Sydney(66) ── Paris(99). Walk clockwise:
+
+```
+  P2 at 34 ──clockwise──► Tokyo at 48      ← was Sydney, now Tokyo
+  P3 at 47 ──clockwise──► Tokyo at 48      ← was Sydney, now Tokyo
+  P5 at 49 ──clockwise──► Sydney at 66     (still Sydney)
+  P4 at 54 ──clockwise──► Sydney at 66     (still Sydney)
+  P1 at 66 ──clockwise──► Sydney at 66     (still Sydney)
+  P0 at 94 ──clockwise──► Paris at 99      (unchanged)
 ```
 
 ```
   Before:                          After Tokyo joins:
   ─────────                        ─────────────────
-  Paris:    P0, P5  (2)            Paris:    P0, P5  (2)     (unchanged ✓)
-  Sydney:   P1, P2  (2)           Sydney:   P1, P2  (2)     (unchanged ✓)
-  Spain: P3, P4  (2)           Spain: P4       (1)     (lost P3)
-                                   Tokyo:    P3       (1)     (got P3 from Spain)
+  Paris:    P0     (1)             Paris:    P0     (1)  (unchanged ✓)
+  Sydney:   P1-P5  (5)            Sydney:   P1,P4,P5 (3) (lost P2,P3)
+  Spain:    —      (0)            Tokyo:    P2,P3  (2)  (absorbed from Sydney)
+                                   Spain:    —      (0)  (still nothing)
 
-  Moved: P3 only (1 partition!)
-  Stayed: P0, P1, P2, P4, P5 (5 of 6 partitions — untouched)
+  Moved: P2, P3 (2 partitions)
+  Stayed: P0, P1, P4, P5 (4 of 6 — untouched)
 ```
 
-Tokyo "steals" only the partitions that fall between it and the previous worker counter-clockwise (Spain). Minimal disruption.
+Tokyo absorbs partitions from the arc between itself and the previous worker (Spain). **Spain still gets nothing** because its arc (99→4) remains tiny regardless of how many workers join elsewhere.
 
-**Why this matters for our use case:** When a new worker joins your geo cluster, it doesn't cause a full rebalance. Only a fraction of partitions (roughly 1/N) move to the new worker. Workers that were happily processing their partitions continue without interruption.
+**Why this matters for our use case:** The minimal-disruption property (only ~K/N keys move) is real and valuable, but the **distribution quality depends entirely on virtual nodes**. Without them, the ring is unreliable at small scale.
 
-### The Virtual Node Problem
+### The Virtual Node Solution
 
-In our clean example, each worker got exactly 2 partitions. That was luck. With real hash functions the ring arcs between workers are unequal. Imagine instead:
+The example above demonstrated the real problem: 3 workers produced a 1-5-0 split. This isn't bad luck — with only 3 points on a ring of 100, the arcs are randomly sized and often wildly unequal.
 
-```
-  hash("paris")    = 10
-  hash("sydney")   = 15    ← only 5 apart from Paris!
-  hash("spain") = 80
-
-  Paris owns:     arc 80→10 = 30% of the ring
-  Sydney owns:    arc 10→15 = 5% of the ring     ← barely anything!
-  Spain owns:  arc 15→80 = 65% of the ring    ← overloaded
-```
-
-With 6 partitions, Spain would likely get 4, Paris would get 2, Sydney might get 0. Terrible distribution.
-
-**Solution: Virtual nodes.** Instead of placing each worker at 1 position, place them at **many** positions:
+**Solution: Virtual nodes.** Instead of placing each worker at 1 position, place them at multiple positions. Here are real SHA-256 mod 100 values for 3 virtual nodes per worker:
 
 ```
-  Paris gets 4 virtual nodes:
-    hash("paris-vn0") = 10
-    hash("paris-vn1") = 35
-    hash("paris-vn2") = 62
-    hash("paris-vn3") = 88
+  hash("paris-0")  = 55    hash("paris-1")  = 16    hash("paris-2")  = 75
+  hash("sydney-0") = 65    hash("sydney-1") = 29    hash("sydney-2") = 36
+  hash("spain-0")  = 77    hash("spain-1")  = 51    hash("spain-2")  = 1
 
-  Sydney gets 4 virtual nodes:
-    hash("sydney-vn0") = 15
-    hash("sydney-vn1") = 42
-    hash("sydney-vn2") = 71
-    hash("sydney-vn3") = 95
-
-  Spain gets 4 virtual nodes:
-    hash("spain-vn0") = 22
-    hash("spain-vn1") = 50
-    hash("spain-vn2") = 80
-    hash("spain-vn3") = 3
-
-  Ring now has 12 points instead of 3:
-
-  Pos:  3(V)  10(P)  15(S)  22(V)  35(P)  42(S)  50(V)  62(P)  71(S)  80(V)  88(P)  95(S)
-        ─────────────────────────────────────────────────────────────────────────────────────►
-
-  Arcs: V=7  P=5   S=7    V=13   P=7    S=8    V=12   P=9    S=9    V=8    P=7    S=5
+  Ring with 9 points (sorted):
+  Pos: 1(ES) 16(PA) 29(SY) 36(SY) 51(ES) 55(PA) 65(SY) 75(PA) 77(ES)
+       ──────────────────────────────────────────────────────────────────►
 ```
 
-Now the ring is much more evenly divided. Each worker's total arc coverage is roughly 33%. The more virtual nodes, the more even it gets.
+Now assign partitions:
 
-**How partition assignment works with virtual nodes:** Same rule — walk clockwise, first virtual node you hit determines the owner. If you hit `sydney-vn2`, Sydney owns that partition. The "virtual" part is just for placement; ownership maps back to the real worker.
+```
+  P0 at 94 ──clockwise──► spain-2 at 1    ✓ Spain owns P0
+  P1 at 66 ──clockwise──► paris-2 at 75   ✓ Paris owns P1
+  P2 at 34 ──clockwise──► sydney-2 at 36  ✓ Sydney owns P2
+  P3 at 47 ──clockwise──► spain-1 at 51   ✓ Spain owns P3
+  P4 at 54 ──clockwise──► paris-0 at 55   ✓ Paris owns P4
+  P5 at 49 ──clockwise──► spain-1 at 51   ✓ Spain owns P5
+```
+
+```
+  With 3 virtual nodes per worker:
+  Paris:    P1, P4    (2 partitions)
+  Sydney:   P2        (1 partition)
+  Spain:    P0, P3, P5 (3 partitions)
+```
+
+Better than 1-5-0, but still not even (2-1-3). With 150 virtual nodes per worker, the distribution converges to nearly equal arcs and even partition counts. The trade-off: ring size grows to 450 entries.
+
+**How partition assignment works with virtual nodes:** Same rule — walk clockwise, first virtual node you hit determines the owner. If you hit `sydney-2` (Sydney's 3rd virtual node at position 36), Sydney owns that partition. The "virtual" part is just for placement; ownership maps back to the real worker.
 
 **Trade-offs of virtual node count:**
 
