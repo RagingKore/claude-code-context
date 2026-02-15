@@ -5,6 +5,7 @@
     <Project Path="src/ActorConsensus.AkkaDotNet/ActorConsensus.AkkaDotNet.csproj" />
     <Project Path="src/ActorConsensus.AkkaCluster/ActorConsensus.AkkaCluster.csproj" />
     <Project Path="src/ActorConsensus.AkkaWorker/ActorConsensus.AkkaWorker.csproj" />
+    <Project Path="src/ActorConsensus.AkkaDiscoveryKurrentDb/ActorConsensus.AkkaDiscoveryKurrentDb.csproj" />
     <Project Path="src/ActorConsensus.Runner/ActorConsensus.Runner.csproj" />
   </Folder>
 </Solution>
