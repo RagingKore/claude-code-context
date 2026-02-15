@@ -34,16 +34,53 @@ The key group count is a **fixed architectural parameter** (default: **128**). I
 
 | Property | Impact |
 |---|---|
-| **Maximum parallelism** | 128 key groups = at most 128 workers can be fully utilized |
+| **Maximum parallelism** | Key group count = absolute ceiling on useful workers (128 KGs → 128th worker is the last one that gets work) |
 | **Rebalance granularity** | More key groups = finer-grained, smoother rebalancing |
-| **Distribution quality** | 128 KGs / 3 workers ≈ 43 each — even distribution with any hash-based strategy |
+| **Distribution quality** | Depends heavily on the KG-to-worker ratio (see below) |
 | **Hot stream isolation** | Two hot streams in the same key group can't be separated — more key groups reduces collision probability |
-
-> **Why 128?** With 3 workers each gets ~43 key groups (great distribution). Scales comfortably to 10 workers (13 each — still good). Leaves headroom to 20+ workers before the ratio gets tight. No meaningful overhead difference vs. 64.
 
 **Changing the key group count is a breaking change** — every stream rehashes to a different key group, invalidating all existing assignments and checkpoints. Over-provision upfront.
 
-> **Impact on this analysis:** The scenario walkthroughs below use 6 simplified partitions (P0-P5) to keep examples readable. In production with 128 key groups, the hash-based distribution problems flagged for Options 4 and 6 (uneven splits, "new worker gets nothing") are effectively eliminated. Notes are added where relevant.
+### The 1:1 Ratio Problem
+
+**128 workers is an expected production scenario.** With 128 key groups and 128 workers, each worker should get exactly 1 key group. But hash-based assignment (Options 4, 6) **cannot guarantee this** — it's the classic "balls into bins" problem:
+
+```
+  128 KGs randomly assigned to 128 workers (Poisson λ=1):
+
+  Workers getting 0 KGs:  ~47  (36.8%)  ← idle, wasting resources!
+  Workers getting 1 KG:   ~47  (36.8%)  ← correct
+  Workers getting 2 KGs:  ~24  (18.4%)  ← overloaded
+  Workers getting 3+ KGs:  ~10 ( 8.0%)  ← heavily overloaded
+```
+
+This isn't a bug in the hash function — it's a mathematical certainty. When the number of items equals the number of buckets, random assignment leaves ~37% of buckets empty. Virtual nodes (Option 4) don't help: they make the ring arcs even, but 128 key groups across 128 evenly-sized arcs is still 128 balls into 128 bins.
+
+**Which options handle 1:1?**
+
+| Option | 1:1 distribution | Why |
+|---|---|---|
+| 1. Bully | **Exact** ✓ | Leader assigns precisely 1 per worker |
+| 2. Raft | **Exact** ✓ | Leader assigns precisely 1 per worker |
+| 3. KurrentDB Log | **Depends** | Sorted round-robin = exact. HRW = broken. |
+| 4. Hash Ring | **Broken** ✗ | ~47 idle workers, ~10 with 3+ KGs |
+| 5. Protocol Actors | **Exact** ✓ | Proposer assigns precisely 1 per worker |
+| 6. Rendezvous (HRW) | **Broken** ✗ | ~47 idle workers, ~10 with 3+ KGs |
+| 7. Gossip+CRDT | **Depends** | Same as whatever assignment function is used |
+| 8. Work Stealing | **Exact** ✓ | Workers claim 1 each, stop when pool is empty |
+
+**Higher KG counts mitigate but don't eliminate the problem:**
+
+| Key Groups | Workers | Ratio | Idle workers | Variance |
+|---|---|---|---|---|
+| 128 | 128 | 1:1 | **~47 (37%)** | Unusable for hash-based |
+| 256 | 128 | 2:1 | ~17 (13%) | Poor |
+| 512 | 128 | 4:1 | ~2 (2%) | Acceptable |
+| 1024 | 128 | 8:1 | ~0 (0.03%) | Good — ±2.8 KGs/worker (~35% variance) |
+
+> **Key group count recommendation:** If 128 workers is expected, **1024 key groups** provides 8:1 ratio with near-zero idle workers and ~35% distribution variance. 512 is the absolute minimum for hash-based options. If using leader-based assignment (Options 1, 2, 5), even 128 KGs works perfectly — the leader assigns exactly 1 per worker.
+
+> **Impact on this analysis:** The scenario walkthroughs below use 6 simplified partitions (P0-P5) to keep examples readable. Notes are added where the key group count materially changes the outcome.
 
 ---
 
@@ -473,7 +510,7 @@ Using SHA-256 mod 100 as the hash function. Real computed positions:
 
 > **Bottom line:** Consistent hash ring with raw SHA-256 and no virtual nodes produces wildly uneven distribution at small scale. With 150+ virtual nodes per worker, distribution becomes even — but that's significant added complexity. This is the primary trade-off vs. HRW (Option 6).
 >
-> **With 128 key groups:** The distribution improves significantly even without virtual nodes — 128 points spread across 3 workers gives roughly 40-45 each instead of 1-5-0. However, the cascading failure problem (all of a dead worker's key groups dump onto one clockwise neighbor) persists regardless of key group count. Virtual nodes are still needed for balanced failover.
+> **With more key groups:** Distribution improves with the KG-to-worker ratio, but two structural problems persist: (1) the cascading failure problem — a dead worker's key groups all dump onto one clockwise neighbor regardless of KG count, and (2) **at 1:1 ratio (e.g., 128 KGs with 128 workers), ~47 workers get nothing** (see [The 1:1 Ratio Problem](#the-11-ratio-problem)). Virtual nodes don't help with #2 — it's a fundamental balls-into-bins limitation. Needs at least 8:1 KG-to-worker ratio (1024 KGs) for acceptable distribution at 128 workers.
 
 ### Assignment Flow
 
@@ -498,6 +535,7 @@ Using SHA-256 mod 100 as the hash function. Real computed positions:
 - **Hot partitions** — can't rebalance a hot partition to a less-loaded worker without virtual node tricks
 - **Virtual node tuning** — too few = uneven distribution; too many = larger membership state
 - **No assignment flexibility** — the hash function IS the strategy. Changing strategy = rehashing everything
+- **Cannot guarantee 1:1 at max scale** — at 128 KGs with 128 workers, ~47 workers get nothing (balls-into-bins). Requires high KG/worker ratio (8:1+) or virtual nodes can't save it
 
 ### Geo Considerations
 
@@ -646,7 +684,7 @@ Using SHA-256 of `"partition:worker"`, taking the first 8 hex chars as an intege
   Result: Paris: P5 (1) | Sydney: P0,P2,P3 (3) | Spain: P1,P4 (2)
 ```
 
-Note: with only 6 partitions, a perfectly even 2-2-2 split is unlikely with real hashes. The 3-2-1 distribution is typical variance for small partition counts. **With 128 key groups**, HRW converges toward ~43-43-42 naturally — no virtual nodes needed.
+Note: with only 6 partitions, a perfectly even 2-2-2 split is unlikely with real hashes. The 3-2-1 distribution is typical variance for small partition counts. With a **high KG-to-worker ratio** (e.g., 1024 KGs / 3 workers ≈ 341 each), HRW converges toward even distribution naturally. At 1:1 ratio (128 KGs / 128 workers), HRW fails — see [The 1:1 Ratio Problem](#the-11-ratio-problem).
 
 **B — Sydney Crashes:**
 
@@ -697,7 +735,7 @@ This is a key advantage over the hash ring: when a worker dies, its partitions s
 
 ⚠️ **Small-N problem (6 partitions only):** With only 6 partitions, there's a real chance a new worker's hash scores don't beat any existing winner. Tokyo's scores are consistently lower.
 
-> **With 128 key groups: this problem disappears.** A 4th worker joining a 3-worker cluster will statistically win ~32 of 128 key groups (128/4). The probability of winning zero out of 128 independent hash competitions is vanishingly small. This is the primary reason the key group count matters — it converts HRW from "unreliable at small N" to "reliably even distribution."
+> **With high KG-to-worker ratios: this problem disappears.** A 4th worker joining a 3-worker cluster with 1024 KGs will statistically win ~256. But **at 1:1 ratio (128 KGs, 128 workers), HRW leaves ~47 workers idle** — the same balls-into-bins problem as the hash ring (see [The 1:1 Ratio Problem](#the-11-ratio-problem)). HRW needs at least 8:1 KG-to-worker ratio for reliable distribution.
 
 ### Assignment Flow
 
@@ -722,6 +760,7 @@ This is a key advantage over the hash ring: when a worker dies, its partitions s
 - **O(N) per lookup** — must hash against all workers for each partition (consistent hashing is O(log N) with a sorted ring). Irrelevant for N < 100
 - **Membership agreement still needed** — same sub-problem as every other option
 - **No built-in replication** — assigning K replicas requires taking top-K hashes instead of top-1
+- **Cannot guarantee 1:1 at max scale** — at 128 KGs with 128 workers, ~47 workers get nothing (balls-into-bins). Requires high KG/worker ratio (8:1+) for reliable distribution
 
 ### Weighted Extension
 
@@ -1026,9 +1065,9 @@ How each option handles the 4 shared scenarios:
 | 1. Bully | Election → leader assigns | Spain (highest ID) | 2-2-2 (leader controls) | Election rounds + 1 write (~2-3s geo) |
 | 2. Raft | Election → leader proposes → majority commits | Spain (Raft leader) | 2-2-2 (leader controls) | Election + 1 commit round (~2-4s geo) |
 | 3. KurrentDB Log | Workers write join events → all compute same result | Nobody (deterministic function) | Depends on function | Join events propagate (~1s) |
-| 4. Hash Ring | Workers join ring → local computation | Nobody (hash function) | **1-5-0** ⚠️ (6 KGs, no vnodes) / ~43-43-42 (128 KGs) | Membership propagation (~1s) |
+| 4. Hash Ring | Workers join ring → local computation | Nobody (hash function) | **1-5-0** ⚠️ (6 KGs, no vnodes) / even at high ratio, **broken at 1:1** | Membership propagation (~1s) |
 | 5. Protocol Actors | Any worker proposes → majority votes → commit | First proposer | 2-2-2 (proposer controls) | 2 round-trips (~1-2s geo) |
-| 6. Rendezvous (HRW) | Workers agree on member list → local computation | Nobody (hash function) | **1-3-2** (6 KGs) / ~43-43-42 (128 KGs) | Membership propagation (~1s) |
+| 6. Rendezvous (HRW) | Workers agree on member list → local computation | Nobody (hash function) | **1-3-2** (6 KGs) / even at high ratio, **broken at 1:1** | Membership propagation (~1s) |
 | 7. Gossip+CRDT | Gossip converges → local computation | Nobody (deterministic function) | Depends on function | 2-3 gossip rounds (~600ms-1s) |
 | 8. Work Stealing | Workers race to claim partitions | Whoever writes fastest | ~2-2-2 (non-deterministic) | Immediate (progressive) |
 
@@ -1067,7 +1106,7 @@ How each option handles the 4 shared scenarios:
 | 3. KurrentDB Log | Depends on function | Depends on function | If using HRW: yes |
 | 4. Hash Ring | 2 (P2, P3 → Tokyo) | Sydney loses 2 | Yes — other workers untouched |
 | 5. Protocol Actors | 2 (proposer decides) | Proposer picks | Yes |
-| 6. Rendezvous (HRW) | **0** ⚠️ (6 KGs) / **~32** ✓ (128 KGs) | Nobody (6 KGs) / ~1 from each worker (128 KGs) | 6 KGs: Tokyo gets nothing! / 128 KGs: even ~32 each ✓ |
+| 6. Rendezvous (HRW) | **0** ⚠️ (6 KGs) / ~K/N at high ratio / **broken at 1:1** | Nobody (6 KGs) / spread at high ratio | Even at high KG/worker ratio; ~37% idle at 1:1 |
 | 7. Gossip+CRDT | Depends on function | Depends on function | Depends on function |
 | 8. Work Stealing | 2 (voluntary release by overloaded workers) | Workers holding > floor(6/4) release | Partial — released partitions are non-deterministic |
 
@@ -1088,7 +1127,8 @@ How each option handles the 4 shared scenarios:
 | **Rebalance speed** | Instant (leader) | Majority commit | Event propagation | Instant (local) | 2-phase voting | Instant (local) | Gossip convergence | Steal timeout |
 | **Actor framework fit** | Natural | Natural | DB-centric | Minimal | Very natural | Minimal | Built into Akka | Moderate |
 | **Membership sub-problem** | Election | Raft log | KurrentDB stream | Needs solving | Part of protocol | Needs solving | Gossip (built-in) | KurrentDB heartbeats |
-| **Key group count sensitivity** | None | None | Depends on function | High (vnodes needed at low N) | None | Low (even at 128+) | Depends on function | None |
+| **1:1 KG/worker distribution** | Exact ✓ | Exact ✓ | Depends on function | **Broken** (~37% idle) | Exact ✓ | **Broken** (~37% idle) | Depends on function | Exact ✓ |
+| **Min KG/worker ratio** | 1:1 | 1:1 | Depends on function | 8:1+ | 1:1 | 8:1+ | Depends on function | 1:1 |
 
 ---
 
@@ -1160,7 +1200,7 @@ How each option handles the 4 shared scenarios:
 
 If Option 3 proves viable with deterministic strategies, it may be the winner — it's the simplest thing that could work. If you need non-deterministic strategies (load-based, capacity-based), Option 1 or Option 5 become necessary.
 
-**For the hashing family** (Options 4 and 6), spike them together and compare. Rendezvous hashing (Option 6) is likely the better pick — it's simpler, has no virtual node tuning, and supports weighted distribution. See the [Consistent Hashing Deep Dive](#appendix-a-consistent-hashing-deep-dive) below for a thorough comparison.
+**For the hashing family** (Options 4 and 6), spike them together and compare. Rendezvous hashing (Option 6) is likely the better pick — it's simpler, has no virtual node tuning, and supports weighted distribution. See the [Consistent Hashing Deep Dive](#appendix-a-consistent-hashing-deep-dive) below for a thorough comparison. **However:** both Options 4 and 6 fundamentally cannot guarantee even distribution when workers ≈ key groups (the 1:1 ratio problem). At 128 workers with 128 key groups, ~37% of workers sit idle. This means either (a) the key group count must be 8x+ the max worker count (1024 KGs for 128 workers), or (b) hash-based options are only viable when combined with a leader/proposer that does the actual assignment using the hash as a hint.
 
 Option 7 (Gossip+CRDT) is interesting because we already have the Akka Cluster spike — we could plug in a custom assignment function on top of Akka's gossip membership without building gossip from scratch.
 
@@ -1449,4 +1489,8 @@ This is relevant if some partitions are much hotter than others — the bounded-
 
 ### Key Takeaway
 
-Consistent hashing is a foundational algorithm worth understanding, but for our partition assignment problem with 3-10 workers and 128 key groups, **rendezvous hashing (Option 6) is the practical choice**. It gives the same minimal-disruption guarantee with less code, no tuning, and built-in weight support. With 128 key groups, HRW's distribution is naturally even (~43 per worker with 3 workers) without any virtual nodes. Consistent hashing also distributes better at 128 key groups, but it still needs virtual nodes for balanced failover (the cascading-to-one-neighbor problem persists regardless of key group count). Think of consistent hashing as the "industrial-scale" version and rendezvous hashing as the "right-sized" version for our problem.
+Consistent hashing is a foundational algorithm worth understanding, but for our partition assignment problem, **neither consistent hashing nor rendezvous hashing can guarantee even distribution when workers ≈ key groups**. At 128 KGs with 128 workers (1:1), both leave ~37% of workers idle — a mathematical certainty (balls-into-bins), not a tuning issue.
+
+For **low worker counts** (3-10), rendezvous hashing (Option 6) is the practical choice among hash-based options — same minimal-disruption guarantee with less code, no tuning, and built-in weight support.
+
+For **high worker counts** approaching the key group count, **only leader-based options (1, 2, 5) or claim-based (8) can guarantee exact 1:1 assignment**. Hash-based options need at least 8:1 KG-to-worker ratio (1024 KGs for 128 workers) to distribute reliably. This is the fundamental architectural constraint: the key group count must be chosen with both the hash-based distribution requirements AND the maximum worker count in mind.
