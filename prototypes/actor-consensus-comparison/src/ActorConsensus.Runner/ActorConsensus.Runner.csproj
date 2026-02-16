@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+    <NoWarn>$(NoWarn);DOTNEXT001</NoWarn>
+    <RootNamespace>ActorConsensus.Runner</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ActorConsensus.Contracts\ActorConsensus.Contracts.csproj" />
+    <ProjectReference Include="..\ActorConsensus.ProtoActor\ActorConsensus.ProtoActor.csproj" />
+    <ProjectReference Include="..\ActorConsensus.AkkaDotNet\ActorConsensus.AkkaDotNet.csproj" />
+    <ProjectReference Include="..\ActorConsensus.AkkaCluster\ActorConsensus.AkkaCluster.csproj" />
+    <ProjectReference Include="..\ActorConsensus.AkkaWorker\ActorConsensus.AkkaWorker.csproj" />
+    <ProjectReference Include="..\ActorConsensus.DotNextRaft\ActorConsensus.DotNextRaft.csproj" />
+  </ItemGroup>
+
+</Project>
